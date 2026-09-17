@@ -1,0 +1,164 @@
+{
+  "id": "git-init-selective-stage",
+  "category": "git",
+  "difficulty": "frontier",
+  "prompt": "/w is a project folder with NO git repository in it yet.\n\n1. Initialise a repository in /w whose initial branch is named `main`, with the repository-local (not global) identity user.name `Dev Bot` and user.email `dev@example.com`.\n\n2. Fix /w/scripts/report.sh. It reads /w/data/sales.csv, which has a header line and then `region,amount,note` rows in CSV form: a field may be wrapped in double quotes and a quoted field may contain commas (one region is literally named `North, Coastal`, and some notes contain commas too), so splitting on every comma gives the wrong answer. The script must print one line per region, then a total line:\n     region=<name> total=<sum> second=<second-largest single amount for that region>\n     TOTAL=<sum of every amount>\n   Region lines are ordered by total DESCENDING, and regions with equal totals are ordered by region name ASCENDING by plain byte order, so an uppercase initial sorts before a lowercase one. `second` is the second largest single amount in that region, where a value that occurs more than once counts each time it occurs (so a region whose largest amount appears twice has `second` equal to that same amount); a region with only one row prints `second=-`. All amounts are non-negative integers. Run from /w, `./scripts/report.sh` must print exactly:\n     region=North, Coastal total=250 second=100\n     region=west total=250 second=-\n     region=south total=100 second=40\n     region=east total=10 second=3\n     TOTAL=610\n   Do not change /w/data/sales.csv. The script must be executable and its committed file mode must be 100755, and it must print that same output no matter which directory it is invoked from - running `/w/scripts/report.sh` from `/tmp` must print exactly the same lines, so it cannot rely on the caller's working directory.\n\n3. Keep these OUT of version control while leaving every one of them on disk, using the RIGHT mechanism for each:\n   - shared, everyone-on-the-team artefacts go in a tracked /w/.gitignore: the whole `build/` directory (including build/cache/objects.o), every `*.log` file in any directory (tmp.log and logs/run.log), and secrets.env.\n   - your own private files must NOT appear in .gitignore, because they are nobody else's business; exclude them with this clone's own private, untracked exclude file, /w/.git/info/exclude, instead: notes.personal.md and the whole `scratch/` directory.\n   /w/.gitignore must not mention `notes.personal` or `scratch`, and /w/.git/info/exclude must not mention `build`, `secrets.env` or `.log`. Careful: /w/docs/build.md must stay TRACKED - do not let a sloppy `build` pattern swallow it.\n\n4. Make exactly THREE commits on `main`, in this order, each containing exactly the paths listed and nothing else:\n   1. `.gitignore`, `README.md`, `data/sales.csv`, `docs/build.md`, `src/app.py`, `src/util.py`\n      subject line exactly: chore(repo): import sources and data\n   2. `scripts/report.sh` (the fixed, executable version)\n      subject line exactly: feat(report): add the regional report\n   3. `README.md` only, appended with a line that quotes the report's first output line verbatim: region=North, Coastal total=250 second=100\n      subject line exactly: docs(readme): show the report output\n\n5. Put an ANNOTATED tag `v0.1.0` on the third commit whose message subject line is exactly: release 0.1.0\n\nWhen you are done `git status --porcelain` prints nothing, `git ls-files` lists exactly the seven tracked paths, and `git rev-list --count HEAD` is 3.",
+  "setup": {
+    "files": {
+      "README.md": "# regional-sales\n\nA tiny reporting project.\n",
+      "src/app.py": "\"\"\"Entry point. The real work lives in util.py.\"\"\"\nfrom util import slugify\n\nif __name__ == \"__main__\":\n    print(slugify(\"North West Region\"))\n",
+      "src/util.py": "def slugify(text):\n    return \"-\".join(text.lower().split())\n",
+      "docs/build.md": "# Building\n\nRun `./scripts/report.sh` from the repository root. It reads `data/sales.csv`.\nThis file lives under docs/ and IS tracked, even though `build` appears in its name.\n",
+      "data/sales.csv": "region,amount,note\n\"North, Coastal\",100,\"ships weekly\"\nsouth,40,\n\"North, Coastal\",100,\neast,7,\"tiny, but ours\"\nsouth,60,\nwest,250,\neast,3,\n\"North, Coastal\",50,\nsouth,0,\n",
+      "scripts/report.sh": "#!/bin/bash\n# Regional sales report. Reads data/sales.csv and prints one line per region.\n# KNOWN BROKEN: sorting, ties and the \"second largest\" column are all wrong.\n\ncut -d, -f1 data/sales.csv | sort -u | while read -r region; do\n  total=$(grep \"^$region,\" data/sales.csv | cut -d, -f2 | paste -sd+ | bc)\n  echo \"region=$region total=$total second=?\"\ndone\n",
+      "build/app.bin": "not a real binary\n",
+      "build/cache/objects.o": "not a real object\n",
+      "secrets.env": "TOKEN=sk-live-nope\n",
+      "tmp.log": "log line\n",
+      "logs/run.log": "log line\n",
+      "notes.personal.md": "my own notes, never shared\n",
+      "scratch/ideas.txt": "idea 1\n",
+      "scratch/old/draft.txt": "older idea\n"
+    },
+    "commands": []
+  },
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "timeout_s": 1200,
+  "network": false,
+  "checks": [
+    {
+      "type": "command_output",
+      "cmd": "git rev-parse --abbrev-ref HEAD",
+      "regex": "^main$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git config --local user.name",
+      "regex": "^Dev Bot$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git config --local user.email",
+      "regex": "^dev@example\\.com$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "./scripts/report.sh",
+      "contains": "region=North, Coastal total=250 second=100\nregion=west total=250 second=-\nregion=south total=100 second=40\nregion=east total=10 second=3\nTOTAL=610\n"
+    },
+    {
+      "type": "command_output",
+      "cmd": "cd /tmp && /w/scripts/report.sh",
+      "contains": "region=North, Coastal total=250 second=100\nregion=west total=250 second=-\nregion=south total=100 second=40\nregion=east total=10 second=3\nTOTAL=610\n"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test \"$(git ls-files | tr '\\n' '|')\" = \".gitignore|README.md|data/sales.csv|docs/build.md|scripts/report.sh|src/app.py|src/util.py|\""
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test -z \"$(git status --porcelain)\""
+    },
+    {
+      "type": "command_output",
+      "cmd": "git rev-list --count HEAD",
+      "regex": "^3$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git ls-tree HEAD scripts/report.sh",
+      "regex": "^100755 blob"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git log -1 --format=%s HEAD~2",
+      "regex": "^chore\\(repo\\): import sources and data$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git log -1 --format=%s HEAD~1",
+      "regex": "^feat\\(report\\): add the regional report$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git log -1 --format=%s HEAD",
+      "regex": "^docs\\(readme\\): show the report output$"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test \"$(git show --name-only --format= HEAD~2 | LC_ALL=C sort | tr -d '[:space:]')\" = '.gitignoreREADME.mddata/sales.csvdocs/build.mdsrc/app.pysrc/util.py'"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test \"$(git show --name-only --format= HEAD~1 | tr -d '[:space:]')\" = 'scripts/report.sh'"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test \"$(git show --name-only --format= HEAD | tr -d '[:space:]')\" = 'README.md'"
+    },
+    {
+      "type": "file_matches",
+      "path": "README.md",
+      "regex": "region=North, Coastal total=250 second=100"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git cat-file -t v0.1.0",
+      "regex": "^tag$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git tag -l --format='%(contents:subject)' v0.1.0",
+      "regex": "^release 0\\.1\\.0$"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test \"$(git rev-parse v0.1.0^{commit})\" = \"$(git rev-parse HEAD)\""
+    },
+    {
+      "type": "command_output",
+      "cmd": "set -e; for p in 'README.md' 'data/sales.csv' 'docs/build.md' 'scripts/report.sh' 'src/app.py' 'src/util.py' 'build/app.bin' 'build/cache/objects.o' 'secrets.env' 'tmp.log' 'logs/run.log' 'notes.personal.md' 'scratch/ideas.txt' 'scratch/old/draft.txt'; do test -f \"$p\" || { echo \"MISSING $p\"; exit 1; }; done; echo ALL_ON_DISK",
+      "contains": "ALL_ON_DISK"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "! grep -qE 'notes\\.personal|scratch' .gitignore"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "! grep -qE 'build|secrets\\.env|\\.log' .git/info/exclude"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git check-ignore -v build/cache/objects.o",
+      "regex": "^\\.gitignore:"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git check-ignore -v logs/run.log",
+      "regex": "^\\.gitignore:"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git check-ignore -v notes.personal.md",
+      "regex": "info/exclude:"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git check-ignore -v scratch/old/draft.txt",
+      "regex": "info/exclude:"
+    },
+    {
+      "type": "file_count",
+      "glob": "**/.gitignore",
+      "min": 1,
+      "max": 1
+    }
+  ],
+  "_turn_budget_note": "raised from 28 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

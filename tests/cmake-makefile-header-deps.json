@@ -1,0 +1,114 @@
+{
+  "id": "cmake-makefile-header-deps",
+  "category": "cmake",
+  "difficulty": "frontier",
+  "prompt": "No CMake in this one: write a hand-written GNU Makefile at /w/Makefile for the tree already in /w. Do not create a CMakeLists.txt and do not edit or move any .cpp, .hpp, .py or data file. Every requirement below is checked.\n\n1. TWO BUILD MODES in ONE tree. The variable MODE selects the mode and defaults to `debug`; `make MODE=release` selects release. Everything a mode produces lives under build/$(MODE)/, so the two modes never overwrite each other and building one must not touch a single file of the other.\n     objects   build/$(MODE)/obj/<path mirroring src/>.o\n     archive   build/$(MODE)/lib/libcore.a\n     binary    build/$(MODE)/bin/app\n     generated build/$(MODE)/gen/\n2. Compile with `g++ -std=c++17 -Iinclude -Ibuild/$(MODE)/gen` plus the dependency flags of requirement 5, plus per mode: debug adds `-O0 -g`, release adds `-O2 -DNDEBUG`. In both modes the macro BUILD_MODE is defined as the C string literal of the mode name, so the program prints `mode=debug` or `mode=release`.\n3. GENERATED SOURCE. `python3 tools/gen_table.py data/table.txt build/$(MODE)/gen` writes table.hpp and table.cpp into that directory. src/main.cpp includes \"table.hpp\", and the generated table.cpp must be compiled to build/$(MODE)/obj/gen/table.o and linked in. Generation must be a make rule with data/table.txt AND tools/gen_table.py as prerequisites, so both regenerate it - and it must run exactly ONCE per clean build, even under `make -j8`: the generator appends a line to build/$(MODE)/gen/gen.log every time it runs, so a duplicated rule is visible there.\n4. ARCHIVE. The objects built from src/core/ - and only those - are archived into build/$(MODE)/lib/libcore.a with `ar`, and the binary is linked from the remaining objects plus that archive. `ar t` on it must list exactly matrix.o and util.o.\n5. REAL automatic header dependencies: compile with -MMD -MP and `-include` the generated .d files. Do not hand-write header prerequisites and do not make every object depend on every header.\n6. The source list must be DISCOVERED from the tree (e.g. with $(shell find ...) or $(wildcard ...)), not typed out. Dropping a new .cpp anywhere under src/ and running `make` must build and link it with no edit to the Makefile.\n7. `make` run a second time with nothing changed must recompile, re-archive and relink NOTHING: no object file's timestamp may change. In particular, if you make an object depend on the directory it lives in, that directory's timestamp changes every time a sibling object is written and everything rebuilds - use an order-only prerequisite (the `|` form) or just mkdir -p inside the recipe.\n8. Precise incremental rebuilds. src/core/matrix.cpp and src/util/text.cpp are the only sources that include config.hpp, directly or indirectly. Editing include/config.hpp must recompile build/debug/obj/core/matrix.o and build/debug/obj/util/text.o and MUST NOT recompile build/debug/obj/main.o, build/debug/obj/core/util.o, build/debug/obj/util/util.o or build/debug/obj/gen/table.o.\n8b. The same precision for the generated header: src/main.cpp is the only source that includes table.hpp. Appending a value to data/table.txt and running `make` must recompile EXACTLY build/debug/obj/gen/table.o and build/debug/obj/main.o, and no other object - so simply listing the generated header as a normal prerequisite of every object rule, which rebuilds the world every time it is regenerated, is wrong.\n9. Deleting a header after the last source that included it stops including it must not break an incremental build: `make` must still succeed rather than dying with \"No rule to make target 'include/legacy.hpp'\". That is what -MP is for.\n10. A clean parallel build, `make -j8` from an empty tree, must succeed in both modes.\n11. `make clean` deletes the whole build/ directory, both modes with it.\n\nWith the tree as it stands, ./build/debug/bin/app prints exactly `det=-2 trace=5 scaled=-6 slug=hello-world shout=HEY rep=ababab sum=14 n=5 mode=debug` and, after `make MODE=release`, ./build/release/bin/app prints exactly `det=-2 trace=5 scaled=-6 slug=hello-world shout=HEY rep=ababab sum=14 n=5 mode=release`. Verify that yourself, then verify requirements 7, 8 and 9 by actually running them.",
+  "setup": {
+    "files": {
+      "data/table.txt": "3 1 4 1 5\n",
+      "tools/gen_table.py": "#!/usr/bin/env python3\n\"\"\"Usage: gen_table.py <data file> <output directory>\n\nWrites <outdir>/table.hpp and <outdir>/table.cpp from the integers in the data file, and\nappends one line to <outdir>/gen.log every time it runs.\n\"\"\"\nimport os\nimport sys\n\nsrc, outdir = sys.argv[1], sys.argv[2]\nvals = [int(tok) for tok in open(src).read().split()]\nos.makedirs(outdir, exist_ok=True)\nwith open(os.path.join(outdir, \"table.hpp\"), \"w\") as fh:\n    fh.write(\"#pragma once\\nnamespace gen {\\nint table_sum();\\nint table_count();\\n}\\n\")\nwith open(os.path.join(outdir, \"table.cpp\"), \"w\") as fh:\n    fh.write('#include \"table.hpp\"\\nnamespace gen {\\n')\n    fh.write(\"int table_sum() { return %d; }\\n\" % sum(vals))\n    fh.write(\"int table_count() { return %d; }\\n}\\n\" % len(vals))\nwith open(os.path.join(outdir, \"gen.log\"), \"a\") as fh:\n    fh.write(\"generated %d values\\n\" % len(vals))\n",
+      "include/config.hpp": "#pragma once\nconstexpr int SCALE = 3;\n",
+      "include/legacy.hpp": "#pragma once\n// Legacy tuning constant. Nothing reads it any more.\nconstexpr int LEGACY_FUDGE = 11;\n",
+      "include/core/matrix.hpp": "#pragma once\nnamespace core {\nstruct Mat2 { int a; int b; int c; int d; };\nint det(const Mat2& m);\nint scaled_det(const Mat2& m);\n}\n",
+      "include/core/util.hpp": "#pragma once\n#include \"core/matrix.hpp\"\nnamespace core {\nint trace(const Mat2& m);\n}\n",
+      "include/util/util.hpp": "#pragma once\n#include <string>\nnamespace util {\nstd::string slug(const std::string& s);\nstd::string shout(const std::string& s);\n}\n",
+      "include/util/text.hpp": "#pragma once\n#include <string>\nnamespace text {\nstd::string rep(const std::string& s);\n}\n",
+      "src/core/matrix.cpp": "#include \"core/matrix.hpp\"\n#include \"config.hpp\"\nnamespace core {\nint det(const Mat2& m) { return m.a * m.d - m.b * m.c; }\nint scaled_det(const Mat2& m) { return det(m) * SCALE; }\n}\n",
+      "src/core/util.cpp": "#include \"core/util.hpp\"\nnamespace core {\nint trace(const Mat2& m) { return m.a + m.d; }\n}\n",
+      "src/util/util.cpp": "#include \"util/util.hpp\"\n#include \"legacy.hpp\"\n#include <cctype>\nnamespace util {\nstd::string slug(const std::string& s) {\n    std::string out;\n    for (char ch : s) {\n        if (ch == ' ') out += '-';\n        else out += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));\n    }\n    return out;\n}\nstd::string shout(const std::string& s) {\n    std::string out;\n    for (char ch : s) out += static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));\n    return out;\n}\n}\n",
+      "src/util/text.cpp": "#include \"util/text.hpp\"\n#include \"config.hpp\"\nnamespace text {\nstd::string rep(const std::string& s) {\n    std::string out;\n    for (int i = 0; i < SCALE; ++i) out += s;\n    return out;\n}\n}\n",
+      "src/main.cpp": "#include \"core/matrix.hpp\"\n#include \"core/util.hpp\"\n#include \"util/util.hpp\"\n#include \"util/text.hpp\"\n#include \"table.hpp\"\n#include <cstdio>\n#ifndef BUILD_MODE\n#define BUILD_MODE \"unset\"\n#endif\nint main() {\n    const core::Mat2 m{1, 2, 3, 4};\n    std::printf(\"det=%d trace=%d scaled=%d slug=%s shout=%s rep=%s sum=%d n=%d mode=%s\\n\",\n                core::det(m), core::trace(m), core::scaled_det(m),\n                util::slug(\"Hello World\").c_str(),\n                util::shout(\"hey\").c_str(),\n                text::rep(\"ab\").c_str(),\n                gen::table_sum(), gen::table_count(), BUILD_MODE);\n    return 0;\n}\n"
+    }
+  },
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "checks": [
+    {
+      "type": "file_exists",
+      "path": "Makefile"
+    },
+    {
+      "type": "file_absent",
+      "path": "CMakeLists.txt"
+    },
+    {
+      "type": "command_succeeds",
+      "timeout_s": 300,
+      "cmd": "rm -rf build && make -j8 >/dev/null 2>&1 && test -x build/debug/bin/app"
+    },
+    {
+      "type": "command_output",
+      "cmd": "./build/debug/bin/app",
+      "contains": "det=-2 trace=5 scaled=-6 slug=hello-world shout=HEY rep=ababab sum=14 n=5 mode=debug"
+    },
+    {
+      "type": "command_output",
+      "cmd": "find build/debug/obj -name '*.o' | sort | tr '\\n' ' '",
+      "contains": "build/debug/obj/core/matrix.o build/debug/obj/core/util.o build/debug/obj/gen/table.o build/debug/obj/main.o build/debug/obj/util/text.o build/debug/obj/util/util.o "
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "echo \"GENRUNS=$(wc -l < build/debug/gen/gen.log)\"",
+      "regex": "GENRUNS=\\s*1\\b"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "echo \"ARCHIVE=[$(ar t build/debug/lib/libcore.a | sort | tr '\\n' ' ')]\"",
+      "regex": "ARCHIVE=\\[matrix\\.o util\\.o \\]"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "find build/debug/obj -name '*.d' | wc -l",
+      "regex": "^6$"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "before=$(find build/debug -name '*.o' -o -name '*.a' | xargs stat -c '%n %.Y' | sort); make >/dev/null 2>&1; after=$(find build/debug -name '*.o' -o -name '*.a' | xargs stat -c '%n %.Y' | sort); if [ \"$before\" = \"$after\" ]; then echo IDEMPOTENT; else echo REBUILT; diff <(echo \"$before\") <(echo \"$after\"); fi; true",
+      "contains": "IDEMPOTENT"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "dbg_before=$(find build/debug -name '*.o' -exec stat -c '%n %.Y' {} + | sort); make MODE=release -j8 >/dev/null 2>&1 || echo RELEASE-BUILD-FAILED; dbg_after=$(find build/debug -name '*.o' -exec stat -c '%n %.Y' {} + | sort); if [ \"$dbg_before\" = \"$dbg_after\" ]; then echo DEBUG-UNTOUCHED; else echo DEBUG-DISTURBED; fi; ./build/release/bin/app",
+      "regex": "DEBUG-UNTOUCHED[\\s\\S]*det=-2 trace=5 scaled=-6 slug=hello-world shout=HEY rep=ababab sum=14 n=5 mode=release"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "before=$(find build/debug/obj -name '*.o' -exec stat -c '%n %.Y' {} + | sort); sed -i 's/SCALE = 3/SCALE = 5/' include/config.hpp; make >/dev/null 2>&1; after=$(find build/debug/obj -name '*.o' -exec stat -c '%n %.Y' {} + | sort); changed=$(diff <(echo \"$before\") <(echo \"$after\") | grep '^>' | awk '{print $2}' | sort | tr '\\n' ' '); echo \"CHANGED=[$changed]\"; ./build/debug/bin/app",
+      "regex": "CHANGED=\\[build/debug/obj/core/matrix\\.o build/debug/obj/util/text\\.o \\][\\s\\S]*det=-2 trace=5 scaled=-10 slug=hello-world shout=HEY rep=ababababab sum=14 n=5 mode=debug"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "before=$(find build/debug/obj -name '*.o' -exec stat -c '%n %.Y' {} + | sort); printf '9\\n' >> data/table.txt; make >/dev/null 2>&1; after=$(find build/debug/obj -name '*.o' -exec stat -c '%n %.Y' {} + | sort); changed=$(diff <(echo \"$before\") <(echo \"$after\") | grep '^>' | awk '{print $2}' | sort | tr '\\n' ' '); echo \"REGEN=[$changed]\"; ./build/debug/bin/app",
+      "regex": "REGEN=\\[build/debug/obj/gen/table\\.o build/debug/obj/main\\.o \\][\\s\\S]*det=-2 trace=5 scaled=-10 slug=hello-world shout=HEY rep=ababababab sum=23 n=6 mode=debug"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "before=$(find build/debug/obj -name '*.o' -exec stat -c '%n %.Y' {} + | sort); printf 'namespace extra { int extra_marker_value() { return 7; } }\\n' > src/util/extra.cpp; make >/dev/null 2>&1 || { echo BUILD-FAILED; exit 0; }; after=$(find build/debug/obj -name '*.o' -exec stat -c '%n %.Y' {} + | sort); touched=$(diff <(echo \"$before\") <(echo \"$after\") | grep '^>' | awk '{print $2}' | sort | tr '\\n' ' '); echo \"TOUCHED=[$touched]\"; if nm build/debug/bin/app | grep -q extra_marker_value; then echo LINKED; fi",
+      "regex": "TOUCHED=\\[build/debug/obj/util/extra\\.o \\][\\s\\S]*LINKED"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "sed -i '/legacy\\.hpp/d' src/util/util.cpp && rm -f include/legacy.hpp && if make >/dev/null 2>&1; then echo MP-OK; else echo MP-BROKEN; make 2>&1 | tail -3; fi",
+      "contains": "MP-OK"
+    },
+    {
+      "type": "command_succeeds",
+      "timeout_s": 120,
+      "cmd": "make clean >/dev/null 2>&1 && test ! -e build"
+    }
+  ],
+  "_turn_budget_note": "raised from 28 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

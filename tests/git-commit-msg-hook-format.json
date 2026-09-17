@@ -1,0 +1,121 @@
+{
+  "id": "git-commit-msg-hook-format",
+  "category": "git",
+  "difficulty": "frontier",
+  "prompt": "/w is a git repository on `main` with one commit. Node is available; there is no network.\n\n/w/.git/hooks/commit-msg is installed and active (its source is also at /w/tools/commit-msg). It enforces this team's message convention and prints the rule it rejected on. Satisfy it: do NOT edit, delete, replace or bypass it, and never pass `--no-verify`. Discover its rules by running it or by reading it.\n\nTASK A - fix the parser. /w/src/csv.js exports `parseCsvLine(record)`, which must turn one CSV record into an array of fields:\n  - fields are separated by commas; `parseCsvLine(\"\")` is the empty array `[]`, while `parseCsvLine(\",\")` is `[\"\", \"\"]`;\n  - a field may be wrapped in double quotes; inside quotes a doubled `\"\"` means one literal quote, and commas are literal text;\n  - surrounding whitespace is never trimmed, and unquoted fields are taken literally;\n  - a closing quote must be followed by a comma or the end of the record, otherwise throw `new Error(\"text after closing quote\")`;\n  - a quoted field that never closes throws `new Error(\"unterminated quote\")`.\n  `node tests/run_parser_tests.js` prints `PARSER OK` when it is right. Do not modify anything under /w/tests/ or /w/data/.\n\nTASK B - drop the legacy splitter. Delete /w/src/legacy_split.js from the repository and from disk, and stop /w/src/index.js from importing it, keeping `parseCsvLine` exported exactly as it is now. No file under /w/src, /w/tools or /w/tests may still mention `legacy_split` afterwards. /w/tools/report.js must keep working unmodified: `node tools/report.js` must print exactly\n  rows=5 total=1284 top=Line, with, commas\n\nTASK C - commit that work as exactly TWO commits on `main`, in this order:\n  1. subject line exactly `fix(csv): parse quoted fields`, containing ONLY src/csv.js;\n  2. subject line exactly `refactor(csv): drop the legacy splitter`, containing ONLY src/index.js and the deletion of src/legacy_split.js.\n  The last line of BOTH messages must be exactly `Ref: TICKET-4417`. Everything else about the message shape is the commit-msg hook's business.\n\nTASK D - write /w/.git/hooks/pre-commit, executable, that blocks a commit when any STAGED file whose path ends in `.js` contains a tab character or a line longer than 100 characters. It must judge the staged content (what `git show :<path>` or `git diff --cached` reports), NOT the working-tree copy, so that a commit still succeeds when only the unstaged copy offends. For each offending line it prints exactly one line\n  PRECOMMIT <path>:<lineno>: <reason>\nwhere <path> is the repository-relative path exactly as git reports it (a staged path may contain spaces), <lineno> is 1-based, and <reason> is `tab` or `long-line`, and then it exits non-zero. A line that is both long and contains a tab prints both, tab first. When nothing offends, it prints nothing and exits 0. It must ignore deleted paths and files that are not `.js`. This hook also applies to your own commits above, so keep your JavaScript free of tabs and under 101 columns.",
+  "setup": {
+    "files": {
+      "src/csv.js": "\"use strict\";\n\n// Splits one CSV record into its fields.\n// Known to be wrong on quoted fields; see tests/run_parser_tests.js.\nfunction parseCsvLine(line) {\n  return line.split(\",\").map(function (field) {\n    if (field.startsWith('\"') && field.endsWith('\"')) {\n      return field.slice(1, -1);\n    }\n    return field;\n  });\n}\n\nmodule.exports = { parseCsvLine };\n",
+      "src/legacy_split.js": "\"use strict\";\n\n// Superseded by parseCsvLine(). Kept only until the last caller is gone.\nfunction legacySplit(line) {\n  return line.split(\",\");\n}\n\nmodule.exports = { legacySplit };\n",
+      "src/index.js": "\"use strict\";\n\nconst { parseCsvLine } = require(\"./csv\");\nconst { legacySplit } = require(\"./legacy_split\");\n\nmodule.exports = { parseCsvLine, legacySplit };\n",
+      "tests/run_parser_tests.js": "\"use strict\";\n\nconst assert = require(\"assert\");\nconst { parseCsvLine } = require(\"../src/index.js\");\n\nfunction throws(input, message) {\n  let got = null;\n  try {\n    parseCsvLine(input);\n  } catch (err) {\n    got = err;\n  }\n  assert.ok(got instanceof Error, \"expected an Error for \" + JSON.stringify(input));\n  assert.strictEqual(got.message, message, \"wrong message for \" + JSON.stringify(input));\n}\n\nassert.deepStrictEqual(parseCsvLine(\"\"), []);\nassert.deepStrictEqual(parseCsvLine(\"a\"), [\"a\"]);\nassert.deepStrictEqual(parseCsvLine(\"a,b,c\"), [\"a\", \"b\", \"c\"]);\nassert.deepStrictEqual(parseCsvLine(\",\"), [\"\", \"\"]);\nassert.deepStrictEqual(parseCsvLine(\"a,\"), [\"a\", \"\"]);\nassert.deepStrictEqual(parseCsvLine(\",a\"), [\"\", \"a\"]);\nassert.deepStrictEqual(parseCsvLine('\"\"'), [\"\"]);\nassert.deepStrictEqual(parseCsvLine('\"\",\"\"'), [\"\", \"\"]);\nassert.deepStrictEqual(parseCsvLine('\"a,b\",c'), [\"a,b\", \"c\"]);\nassert.deepStrictEqual(parseCsvLine('\"he said \"\"hi\"\"\",x'), ['he said \"hi\"', \"x\"]);\nassert.deepStrictEqual(parseCsvLine('\"\"\"\"'), ['\"']);\nassert.deepStrictEqual(parseCsvLine(\" a , b \"), [\" a \", \" b \"]);\nassert.deepStrictEqual(parseCsvLine('a,\"b\"'), [\"a\", \"b\"]);\nassert.deepStrictEqual(parseCsvLine('\u017e\u0117,\"\u0161,\u010d\"'), [\"\u017e\u0117\", \"\u0161,\u010d\"]);\nassert.deepStrictEqual(parseCsvLine('\"a\"\"b\"'), ['a\"b']);\nassert.deepStrictEqual(parseCsvLine('x,\"\",y'), [\"x\", \"\", \"y\"]);\nassert.deepStrictEqual(parseCsvLine('a,,b'), ['a', '', 'b']);\nassert.deepStrictEqual(parseCsvLine('\"a\"\"\"\"b\"'), ['a\"\"b']);\nassert.deepStrictEqual(parseCsvLine('a,\"\"'), ['a', '']);\nthrows('\"\"a', 'text after closing quote');\nthrows('\"a\"b', \"text after closing quote\");\nthrows('\"abc', \"unterminated quote\");\nthrows('a,\"b', \"unterminated quote\");\n\nconsole.log(\"PARSER OK\");\n",
+      "tools/report.js": "\"use strict\";\n\nconst fs = require(\"fs\");\nconst path = require(\"path\");\nconst { parseCsvLine } = require(path.join(__dirname, \"..\", \"src\", \"index.js\"));\n\nconst text = fs.readFileSync(path.join(__dirname, \"..\", \"data\", \"orders.csv\"), \"utf8\");\nconst rows = text.split(\"\\n\").filter(function (l) { return l.length > 0; }).slice(1);\n\nlet total = 0;\nlet top = \"\";\nlet best = -1;\nrows.forEach(function (line) {\n  const f = parseCsvLine(line);\n  if (f.length !== 3) {\n    throw new Error(\"bad record: \" + JSON.stringify(f));\n  }\n  const amount = Number(f[2]);\n  total += amount;\n  if (amount > best) {\n    best = amount;\n    top = f[1];\n  }\n});\n\nconsole.log(\"rows=\" + rows.length + \" total=\" + total + \" top=\" + top);\n",
+      "tools/commit-msg": "#!/usr/bin/env python3\n\"\"\"Team commit-message convention. Do not edit, delete, or bypass this hook.\"\"\"\nimport re\nimport sys\n\npath = sys.argv[1]\nwith open(path, encoding=\"utf-8\") as fh:\n    lines = [l for l in fh.read().split(\"\\n\") if not l.startswith(\"#\")]\nwhile lines and lines[-1].strip() == \"\":\n    lines.pop()\n\n\ndef reject(rule, why):\n    print(\"COMMIT-MSG REJECTED [%s] %s\" % (rule, why))\n    raise SystemExit(1)\n\n\nif not lines:\n    reject(\"SUBJECT\", \"the message is empty\")\nsubject = lines[0]\nif not re.match(r\"^(feat|fix|docs|test|chore|refactor)\\([a-z0-9-]+\\): [a-z]\", subject):\n    reject(\"SUBJECT\", \"subject must read  type(scope): lowercase summary  where type is one of \"\n                      \"feat, fix, docs, test, chore, refactor and scope is lowercase\")\nif len(subject) > 50:\n    reject(\"SUBJECT\", \"subject is %d characters and the limit is 50\" % len(subject))\nif subject.endswith(\".\"):\n    reject(\"SUBJECT\", \"subject must not end with a period\")\nif len(lines) < 3:\n    reject(\"BODY\", \"message needs a body: subject, one blank line, then at least one body line\")\nif lines[1].strip() != \"\":\n    reject(\"BLANKLINE\", \"line 2 must be blank, separating the subject from the body\")\nbody = lines[2:]\nif not any(l.strip() for l in body):\n    reject(\"BODY\", \"message needs a body: subject, one blank line, then at least one body line\")\nfor offset, line in enumerate(body):\n    if len(line) > 72:\n        reject(\"WRAP\", \"body line %d is %d characters; wrap the body at 72\"\n                       % (offset + 3, len(line)))\nif not re.match(r\"^Ref: TICKET-[0-9]+$\", lines[-1]):\n    reject(\"TRAILER\", \"the last line must be exactly  Ref: TICKET-<number>\")\n",
+      "data/orders.csv": "id,customer,amount\n1,\"\u016akio prek\u0117s, UAB\",412\n2,\"Smith \"\"Bob\"\" Ltd\",300\n3,Plain Co,72\n4,\"Line, with, commas\",500\n5,,0\n",
+      "docs/usage.md": "# usage\n\n`parseCsvLine(record)` turns one CSV record into an array of fields.\n"
+    },
+    "commands": [
+      "git init -q -b main && git config user.email dev@example.com && git config user.name 'Dev Bot' && git config commit.gpgsign false && git config advice.detachedHead false && git config core.pager cat && git config merge.conflictstyle merge",
+      "git add -A && git commit -q -m 'chore(csv): project skeleton'",
+      "cp tools/commit-msg .git/hooks/commit-msg && chmod +x .git/hooks/commit-msg"
+    ]
+  },
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "timeout_s": 1200,
+  "network": false,
+  "checks": [
+    {
+      "type": "command_output",
+      "cmd": "node tests/run_parser_tests.js",
+      "contains": "PARSER OK"
+    },
+    {
+      "type": "command_output",
+      "cmd": "node tools/report.js",
+      "contains": "rows=5 total=1284 top=Line, with, commas"
+    },
+    {
+      "type": "file_absent",
+      "path": "src/legacy_split.js"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "! grep -rn legacy_split src tools tests"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git rev-list --count HEAD",
+      "regex": "^3$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git log -1 --format=%s HEAD~1",
+      "regex": "^fix\\(csv\\): parse quoted fields$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git log -1 --format=%s HEAD",
+      "regex": "^refactor\\(csv\\): drop the legacy splitter$"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test \"$(git show --name-only --format= HEAD~1 | tr -d '[:space:]')\" = 'src/csv.js'"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test \"$(git show --name-only --format= HEAD | LC_ALL=C sort | tr -d '[:space:]')\" = 'src/index.jssrc/legacy_split.js'"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git log -1 --format=%B HEAD~1 | grep -c '^Ref: TICKET-4417$'",
+      "regex": "^1$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git log -1 --format=%B HEAD | grep -c '^Ref: TICKET-4417$'",
+      "regex": "^1$"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "cmp -s tools/commit-msg .git/hooks/commit-msg"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "git diff --quiet $(git rev-list --max-parents=0 HEAD) HEAD -- tests tools data"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test -z \"$(git status --porcelain)\""
+    },
+    {
+      "type": "command_output",
+      "cmd": "printf 'Bad message\\n' > /tmp/m && .git/hooks/commit-msg /tmp/m; test $? -ne 0 && echo SEEDED_HOOK_LIVE",
+      "contains": "SEEDED_HOOK_LIVE"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test -x .git/hooks/pre-commit"
+    },
+    {
+      "type": "command_output",
+      "cmd": "printf 'const x = 1;\\n\\tconst y = 2;\\n' > src/_drill_bad.js && python3 -c \"open('src/_drill_bad.js','a').write('const z = ' + repr('q'*120) + ';\\n')\" && git add src/_drill_bad.js; out=$(git commit -m 'fix(drill): blocked by pre-commit' -m 'planted violation' -m 'Ref: TICKET-4417' 2>&1); rc=$?; if [ $rc -eq 0 ]; then git reset -q --soft HEAD~1; fi; git reset -q -- src/_drill_bad.js 2>/dev/null; rm -f src/_drill_bad.js; printf '%s\\n' \"$out\" | grep -q 'PRECOMMIT src/_drill_bad.js:2: tab' && echo HAS_TAB; printf '%s\\n' \"$out\" | grep -q 'PRECOMMIT src/_drill_bad.js:3: long-line' && echo HAS_LONG; test $rc -ne 0 && echo DRILL_BLOCKED",
+      "regex": "HAS_TAB.*HAS_LONG.*DRILL_BLOCKED"
+    },
+    {
+      "type": "command_output",
+      "cmd": "mkdir -p 'src/odd dir' && printf 'const a = 1;\\n\\tconst b = 2;\\n' > 'src/odd dir/two words.js' && git add 'src/odd dir/two words.js'; out=$(git commit -m 'fix(drill): spaced path blocked' -m 'planted violation' -m 'Ref: TICKET-4417' 2>&1); rc=$?; if [ $rc -eq 0 ]; then git reset -q --soft HEAD~1; fi; git reset -q -- 'src/odd dir/two words.js' 2>/dev/null; rm -rf 'src/odd dir'; printf '%s\\n' \"$out\" | grep -qF 'PRECOMMIT src/odd dir/two words.js:2: tab' && echo SPACED_PATH_FLAGGED",
+      "contains": "SPACED_PATH_FLAGGED"
+    },
+    {
+      "type": "command_output",
+      "cmd": "printf 'const ok = 1;\\n' > src/_drill_stage.js && git add src/_drill_stage.js && printf '\\tconst dirty = 2;\\n' >> src/_drill_stage.js && git commit -q -m 'chore(drill): staged content only' -m 'positive control' -m 'Ref: TICKET-4417' && echo DRILL_STAGED_OK; git reset -q --hard HEAD~1 >/dev/null 2>&1; rm -f src/_drill_stage.js; true",
+      "contains": "DRILL_STAGED_OK"
+    }
+  ],
+  "_turn_budget_note": "raised from 30 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

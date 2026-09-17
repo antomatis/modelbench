@@ -1,0 +1,167 @@
+{
+  "id": "sandbox-env-src-layout-migration",
+  "category": "sandbox-env",
+  "difficulty": "frontier",
+  "prompt": "Migrate /w's flat tinycalc module into a src layout, offline, python3 stdlib only, no installs, no\nvirtualenv. Python here is 3.9. Run `python3 -m unittest discover -s tests -q` first: the suite is\nalready written against the target shape and currently fails, and its failures describe most of what\nfollows. tests/test_tinycalc.py must pass UNMODIFIED when you are done.\n\nREQUIRED END STATE - the package is importable with PYTHONPATH=src and nothing else:\n\n    src/tinycalc/__init__.py     re-exports the public surface and sets __all__\n    src/tinycalc/errors.py       `class CalcError(ValueError)` and nothing else public\n    src/tinycalc/core.py         add, mul, divide\n    src/tinycalc/ops/__init__.py the op registry\n    src/tinycalc/ops/pow_op.py   the pow op, moved out of plugins/\n    src/tinycalc/ops/mod_op.py   the mod op, moved out of plugins/\n    src/tinycalc/parser.py       the expression evaluator described below\n    src/tinycalc/legacy.py       the deprecation shim described below\n    src/tinycalc/__main__.py     the CLI described below\n\n/w/tinycalc.py, /w/plugins/pow_op.py and /w/plugins/mod_op.py must no longer exist. No file under\nsrc/ may touch sys.path.\n\nBEHAVIOUR\n- `add(a, b)` and `mul(a, b)` are unchanged.\n- `divide(a, b)` is EXACT, not floating point: it returns a `fractions.Fraction`, so\n  `divide(1, 3) * 3 == 1` and `divide(6, 3) == 2`. `divide(a, 0)` raises\n  `CalcError(\"division by zero\")` - note that the old message was different.\n- `registry()`, exported both as `tinycalc.registry` and `tinycalc.ops.registry`, returns a dict\n  mapping op name to its `apply` function. It DISCOVERS the ops at call time by walking the modules\n  of the `tinycalc.ops` package with `pkgutil.iter_modules`, so dropping a new module into\n  src/tinycalc/ops/ is all it takes to add an op - no hand-maintained table anywhere. Module names\n  beginning with an underscore are skipped. The dict is ordered by op name, ascending.\n  A module in that package that lacks a `NAME` string or an `apply` function raises\n  `CalcError(\"bad op module: <the module name>\")`. Two modules claiming the same NAME raise\n  `CalcError(\"duplicate op: <the name>\")`.\n- `evaluate(op, a, b)` looks the op up in the registry and calls it; an op that is not there raises\n  `CalcError(\"unknown op: <op>\")`.\n- `tinycalc.__all__` is exactly\n  `[\"CalcError\", \"add\", \"divide\", \"evaluate\", \"evaluate_expr\", \"mul\", \"registry\"]`.\n\nTHE EXPRESSION EVALUATOR - `src/tinycalc/parser.py` defines `evaluate_expr(text)`, re-exported as\n`tinycalc.evaluate_expr`. It parses and evaluates an infix expression over exact rational arithmetic.\nWhitespace between tokens is insignificant and there is none inside a token. The grammar:\n  - a number is one or more ASCII digits, read in base 10; there are no decimal points;\n  - `(` expression `)` groups;\n  - `name(expr, expr)` calls an op from `registry()` with exactly two arguments, where name is one or\n    more ASCII lower-case letters and digits;\n  - binary operators, from loosest to tightest: `+` and `-` (left associative), then `*`, `/` and `%`\n    (left associative), then unary prefix `-`, then `**` (RIGHT associative).\n    So `2 ** 3 ** 2` is 512, `100 - 10 - 5` is 85, `-2 ** 2` is -4 because `**` binds tighter than\n    the unary minus, and `2 ** -2` is 1/4 because the right operand of `**` may itself be negated.\n  - `/` is exact: `10 / 4` is Fraction(5, 2) and `9 / 3` is 3.\n  - `%` and `**` with a negative exponent: `%` requires both operands to be whole numbers and raises\n    `CalcError(\"modulo needs integers\")` otherwise; `2 ** -2` is Fraction(1, 4).\n  - dividing or taking a modulo by zero raises `CalcError(\"division by zero\")`.\nEvery failure is a `CalcError`, never a SyntaxError or a ValueError escaping the parser:\n  - a character or token that cannot start or continue an expression raises\n    `CalcError(\"unexpected token: <the token text> at <index>\")`, where index is the 0-based position\n    of that token's first character in `text`;\n  - input that ends while more is required, including empty or blank input, raises\n    `CalcError(\"unexpected end of input\")`;\n  - a call to a name that is not in the registry raises `CalcError(\"unknown op: <name>\")`, and a call\n    with any number of arguments other than two raises `CalcError(\"op <name> takes 2 arguments\")`.\n\nTHE SHIM - `src/tinycalc/legacy.py` re-exports add, mul and divide, and issues, at import time,\n`DeprecationWarning` with the exact message `tinycalc.legacy is deprecated; import from tinycalc`,\nraised through `warnings.warn` so that `python3 -W error::DeprecationWarning -c \"import tinycalc.legacy\"`\nfails while a plain import succeeds.\n\nTHE CLI - `python3 -m tinycalc <op> <a> <b>` parses a and b as base-10 integers, computes, prints the\nresult and exits 0. It understands `add`, `mul` and `divide` directly, because those are core\nfunctions and not registry ops, and routes every other op through `evaluate`, so `pow` and `mod`\nwork through the registry and an unknown name produces the `unknown op` error. A Fraction prints as `<numerator>/<denominator>` in lowest terms, except that a\ndenominator of 1 prints as the bare numerator, so `divide 1 3` prints `1/3` and `divide 6 3` prints\n`2`. On a CalcError it prints `error: <the message>` to stderr and exits 2. Given an argument that is\nnot an integer it prints `error: bad number: <the argument>` to stderr and exits 2. Given anything\nother than exactly three arguments it prints `usage: python3 -m tinycalc <op> <a> <b>` to stderr and\nexits 64. As a separate mode, `python3 -m tinycalc -e <expression>` - exactly two arguments - runs\nthe expression evaluator over the single expression argument and prints the result in the same\nformat, with the same error handling and the same exit codes.",
+  "setup": {
+    "files": {
+      "tinycalc.py": "\"\"\"Flat calculator module. Everything lives here, the op table is maintained by hand,\nand division is floating point. This is the thing you are migrating.\"\"\"\n\n\nclass CalcError(ValueError):\n    pass\n\n\ndef add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n\n\ndef divide(a, b):\n    if b == 0:\n        raise CalcError(\"cannot divide by zero\")\n    return a / b\n\n\nOPS = {\"pow\": lambda a, b: a ** b}\n\n\ndef evaluate(op, a, b):\n    if op not in OPS:\n        raise CalcError(\"no such op\")\n    return OPS[op](a, b)\n",
+      "plugins/pow_op.py": "NAME = \"pow\"\n\n\ndef apply(a, b):\n    return a ** b\n",
+      "plugins/mod_op.py": "NAME = \"mod\"\n\n\ndef apply(a, b):\n    return a % b\n",
+      "tests/test_tinycalc.py": "\"\"\"Acceptance suite. DO NOT EDIT. It fails against the flat module on purpose.\n\nRun it with:  python3 -m unittest discover -s tests -q\n\"\"\"\nimport os\nimport sys\nimport unittest\nfrom fractions import Fraction\n\nROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\nsys.path.insert(0, os.path.join(ROOT, \"src\"))\nsys.path.insert(0, ROOT)\n\nimport tinycalc  # noqa: E402\n\n\nclass TestCore(unittest.TestCase):\n    def test_add_and_mul(self):\n        self.assertEqual(tinycalc.add(2, 3), 5)\n        self.assertEqual(tinycalc.mul(-4, 5), -20)\n\n    def test_divide_is_exact_not_float(self):\n        q = tinycalc.divide(1, 3)\n        self.assertIsInstance(q, Fraction)\n        self.assertEqual(q * 3, 1)\n        self.assertEqual(tinycalc.divide(6, 3), 2)\n\n    def test_divide_by_zero_message(self):\n        with self.assertRaises(tinycalc.CalcError) as cm:\n            tinycalc.divide(1, 0)\n        self.assertEqual(str(cm.exception), \"division by zero\")\n        self.assertTrue(issubclass(tinycalc.CalcError, ValueError))\n\n\nclass TestRegistry(unittest.TestCase):\n    def test_registry_is_discovered_and_sorted(self):\n        self.assertEqual(list(tinycalc.registry()), [\"mod\", \"pow\"])\n\n    def test_evaluate_uses_the_registry(self):\n        self.assertEqual(tinycalc.evaluate(\"pow\", 2, 10), 1024)\n        self.assertEqual(tinycalc.evaluate(\"mod\", 17, 5), 2)\n\n    def test_unknown_op_message(self):\n        with self.assertRaises(tinycalc.CalcError) as cm:\n            tinycalc.evaluate(\"nope\", 1, 2)\n        self.assertEqual(str(cm.exception), \"unknown op: nope\")\n\n\nclass TestParser(unittest.TestCase):\n    def test_precedence_and_associativity(self):\n        self.assertEqual(tinycalc.evaluate_expr(\"2 + 3 * 4\"), 14)\n        self.assertEqual(tinycalc.evaluate_expr(\"2 ** 3 ** 2\"), 512)\n        self.assertEqual(tinycalc.evaluate_expr(\"(2 + 3) * 4\"), 20)\n        self.assertEqual(tinycalc.evaluate_expr(\"100 - 10 - 5\"), 85)\n\n    def test_unary_minus_binds_looser_than_power(self):\n        self.assertEqual(tinycalc.evaluate_expr(\"-2 ** 2\"), -4)\n        self.assertEqual(tinycalc.evaluate_expr(\"2 ** -2\"), Fraction(1, 4))\n        self.assertEqual(tinycalc.evaluate_expr(\"--3\"), 3)\n\n    def test_division_stays_exact(self):\n        self.assertEqual(tinycalc.evaluate_expr(\"1/3 + 1/6\"), Fraction(1, 2))\n        self.assertEqual(tinycalc.evaluate_expr(\"10 / 4\"), Fraction(5, 2))\n        self.assertEqual(tinycalc.evaluate_expr(\"9 / 3\"), 3)\n\n    def test_calls_reach_the_registry(self):\n        self.assertEqual(tinycalc.evaluate_expr(\"pow(2, 10) % 7\"), 2)\n        self.assertEqual(tinycalc.evaluate_expr(\"mod(17, 5) + -3\"), -1)\n\n    def test_parse_errors_name_the_token_and_its_index(self):\n        for text, msg in ((\"2 $ 3\", \"unexpected token: $ at 2\"),\n                          (\"2 +\", \"unexpected end of input\"),\n                          (\"\", \"unexpected end of input\"),\n                          (\"(1 + 2\", \"unexpected end of input\"),\n                          (\"nope(1, 2)\", \"unknown op: nope\"),\n                          (\"pow(1)\", \"op pow takes 2 arguments\"),\n                          (\"1 % 0\", \"division by zero\"),\n                          (\"(1/2) % 3\", \"modulo needs integers\")):\n            with self.assertRaises(tinycalc.CalcError, msg=text) as cm:\n                tinycalc.evaluate_expr(text)\n            self.assertEqual(str(cm.exception), msg, text)\n\n\nclass TestSurface(unittest.TestCase):\n    def test_all_is_exact(self):\n        self.assertEqual(tinycalc.__all__,\n                         [\"CalcError\", \"add\", \"divide\", \"evaluate\", \"evaluate_expr\", \"mul\",\n                          \"registry\"])\n\n    def test_submodules_are_where_they_should_be(self):\n        import tinycalc.core\n        import tinycalc.errors\n        import tinycalc.ops\n        import tinycalc.parser\n        self.assertIs(tinycalc.add, tinycalc.core.add)\n        self.assertIs(tinycalc.CalcError, tinycalc.errors.CalcError)\n        self.assertIs(tinycalc.registry, tinycalc.ops.registry)\n        self.assertIs(tinycalc.evaluate_expr, tinycalc.parser.evaluate_expr)\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+    }
+  },
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "timeout_s": 1200,
+  "network": false,
+  "checks": [
+    {
+      "type": "file_exists",
+      "path": "src/tinycalc/__init__.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "src/tinycalc/core.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "src/tinycalc/errors.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "src/tinycalc/ops/__init__.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "src/tinycalc/ops/pow_op.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "src/tinycalc/ops/mod_op.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "src/tinycalc/parser.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "src/tinycalc/legacy.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "src/tinycalc/__main__.py"
+    },
+    {
+      "type": "file_absent",
+      "path": "tinycalc.py"
+    },
+    {
+      "type": "file_absent",
+      "path": "plugins/pow_op.py"
+    },
+    {
+      "type": "file_absent",
+      "path": "plugins/mod_op.py"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "python3 -m unittest discover -s tests -q 2>&1 | tail -3",
+      "contains": "OK"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "python3 -m unittest discover -s tests 2>&1 | tail -4",
+      "contains": "Ran 13 tests"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "PYTHONPATH=src python3 -c \"import tinycalc as t;print(repr(t.divide(1,3)),t.divide(1,3)*3==1,t.divide(6,3),t.__all__,list(t.registry()))\"",
+      "contains": "Fraction(1, 3) True 2 ['CalcError', 'add', 'divide', 'evaluate', 'evaluate_expr', 'mul', 'registry'] ['mod', 'pow']"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "PYTHONPATH=src python3 -c \"import tinycalc as t;print('|'.join(str(t.evaluate_expr(e)) for e in ['1', '2**2**3', '-(3 - 5)', '7 % 3 ** 2', '(1 + 2) * (3 - 1) ** 2', '1/2 * 2/3', 'pow(2, mod(19, 7)) / 8', '8 / 2 / 2', '2 ** 0 - 3']))\"",
+      "contains": "1|256|2|7|12|1/3|4|2|-2"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "PYTHONPATH=src python3 -c \"import tinycalc as t\nfor e in ['1 2', '*3', '(1))', '1 + ', 'p0w(1,2)', 'pow(1,2,3)', '5 / 0', '1 % 0']:\n try:\n  t.evaluate_expr(e)\n  print('NO-RAISE:'+e)\n except t.CalcError as x:\n  print(str(x))\"",
+      "regex": "^unexpected token: 2 at 2\\nunexpected token: \\* at 0\\nunexpected token: \\) at 3\\nunexpected end of input\\nunknown op: p0w\\nop pow takes 2 arguments\\ndivision by zero\\ndivision by zero\\n$"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "printf 'NAME = \"sub\"\\n\\n\\ndef apply(a, b):\\n    return a - b\\n' > src/tinycalc/ops/sub_op.py && PYTHONPATH=src python3 -c \"import tinycalc as t;print(list(t.registry()),t.evaluate('sub',9,4))\"; rc=$?; rm -f src/tinycalc/ops/sub_op.py; rm -rf src/tinycalc/ops/__pycache__; exit $rc",
+      "contains": "['mod', 'pow', 'sub'] 5"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "printf 'NAME = 1\\n' > src/tinycalc/ops/_private.py && PYTHONPATH=src python3 -c \"import tinycalc as t;print(list(t.registry()))\"; rc=$?; rm -f src/tinycalc/ops/_private.py; rm -rf src/tinycalc/ops/__pycache__; exit $rc",
+      "contains": "['mod', 'pow']"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "printf 'X = 1\\n' > src/tinycalc/ops/broken_op.py && PYTHONPATH=src python3 -c \"import tinycalc as t\ntry:\n t.registry()\nexcept t.CalcError as e:\n print('E:'+str(e))\"; rm -f src/tinycalc/ops/broken_op.py; rm -rf src/tinycalc/ops/__pycache__",
+      "contains": "E:bad op module: broken_op"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "printf 'NAME = \"pow\"\\n\\n\\ndef apply(a, b):\\n    return 0\\n' > src/tinycalc/ops/dup_op.py && PYTHONPATH=src python3 -c \"import tinycalc as t\ntry:\n t.registry()\nexcept t.CalcError as e:\n print('E:'+str(e))\"; rm -f src/tinycalc/ops/dup_op.py; rm -rf src/tinycalc/ops/__pycache__",
+      "contains": "E:duplicate op: pow"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "PYTHONPATH=src python3 -W error::DeprecationWarning -c \"import tinycalc.legacy\" 2>&1; echo \"rc=$?\"",
+      "regex": "tinycalc\\.legacy is deprecated; import from tinycalc(.|\\n)*rc=1\\n$"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "PYTHONPATH=src python3 -c \"import warnings;warnings.simplefilter('ignore');import tinycalc.legacy as l;print(l.add(1,2),l.divide(1,4))\"",
+      "contains": "3 1/4"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "PYTHONPATH=src python3 -m tinycalc divide 1 3; PYTHONPATH=src python3 -m tinycalc divide 6 3; PYTHONPATH=src python3 -m tinycalc add 2 3; PYTHONPATH=src python3 -m tinycalc pow 2 10; PYTHONPATH=src python3 -m tinycalc mod 17 5",
+      "regex": "^1/3\\n2\\n5\\n1024\\n2\\n$"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "PYTHONPATH=src python3 -m tinycalc -e '1/3 + 1/6'; PYTHONPATH=src python3 -m tinycalc -e '2 ** 3 ** 2'; PYTHONPATH=src python3 -m tinycalc -e '-2 ** 2'; PYTHONPATH=src python3 -m tinycalc -e 'pow(2, 10) % 7'; PYTHONPATH=src python3 -m tinycalc -e '1 + ' 2>&1 >/dev/null; echo \"rc=$?\"",
+      "regex": "^1/2\\n512\\n-4\\n2\\nerror: unexpected end of input\\nrc=2\\n$"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 300,
+      "cmd": "PYTHONPATH=src python3 -m tinycalc divide 1 0 2>&1 >/dev/null; echo \"a=$?\"; PYTHONPATH=src python3 -m tinycalc nope 1 2 2>&1 >/dev/null; echo \"b=$?\"; PYTHONPATH=src python3 -m tinycalc add x 2 2>&1 >/dev/null; echo \"c=$?\"; PYTHONPATH=src python3 -m tinycalc add 1 2 3 2>&1 >/dev/null; echo \"d=$?\"",
+      "regex": "^error: division by zero\\na=2\\nerror: unknown op: nope\\nb=2\\nerror: bad number: x\\nc=2\\nusage: python3 -m tinycalc <op> <a> <b>\\nd=64\\n$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "echo \"hacks=$(grep -rc 'sys\\.path' src/ | grep -v ':0$' | wc -l)\"",
+      "contains": "hacks=0"
+    },
+    {
+      "type": "command_output",
+      "cmd": "md5sum tests/test_tinycalc.py | cut -c1-32",
+      "contains": "c81a7f517b02410ca2ba754e7f03cd40"
+    }
+  ],
+  "_turn_budget_note": "raised from 30 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

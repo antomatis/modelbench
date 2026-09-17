@@ -1,0 +1,119 @@
+{
+  "id": "shell-fix-broken-log-collector",
+  "category": "shell",
+  "difficulty": "frontier",
+  "prompt": "This workspace holds a small log-archiving tool that does not work. Repair it IN PLACE.\n\n    bin/collect.sh      the entry point\n    lib/naming.sh       next_name: choose a free destination name\n    lib/manifest.sh     manifest_has / manifest_names / manifest_name_for_hash / manifest_add\n    t/test_naming.sh    unit tests for lib/naming.sh        <- currently FAILING\n    t/test_manifest.sh  unit tests for lib/manifest.sh      <- currently FAILING\n    t/run_all.sh        runs both and prints ALL TESTS PASS <- currently FAILING\n    incoming/           the tree to archive\n    archive/            the destination, with manifest.tsv already holding rows from earlier runs\n\nFIRST: run `bash t/run_all.sh`. The three files under t/ are the authority on how next_name and the\nmanifest lookups must behave, including the cases the current code gets wrong. Read them, and read\ntheir failure output. You MUST NOT edit, move or delete anything under t/ \u2014 the three files are\nchecked byte for byte afterwards. Make them pass by fixing lib/naming.sh and lib/manifest.sh.\n\nTHE MANIFEST, archive/manifest.tsv, has four TAB-separated columns: the source path relative to\nincoming/, the archive name, the size in bytes, and the sha256 of the content. It is append-only:\nexisting rows are never rewritten or reordered.\n\nTHEN make bin/collect.sh, at that same path and still executable, run with NO arguments and do\nexactly this:\n\n 1. If incoming/ does not exist, print `error: no such directory: incoming` to stderr and exit 2.\n 2. Create archive/ if needed. Consider every REGULAR FILE whose name ends in `.log` at any depth\n    under incoming/, and process them in byte-wise (LC_ALL=C) ascending order of their full path,\n    so the outcome is deterministic. Files not ending in `.log` are never touched, and directories\n    are never removed.\n 3. ALREADY RECORDED: if the file's path relative to incoming/ already appears in column 1, an\n    earlier run dealt with it. SKIP it, leave it exactly where it is, and count it in `skipped`.\n 4. ALREADY ARCHIVED BY CONTENT: otherwise, if the file's sha256 already appears in column 4 \u2014 from\n    an earlier run OR from a row this run appended a moment ago \u2014 those bytes are in the archive\n    already. Do NOT move it and do NOT make a second copy: leave it in incoming/, count it in\n    `deduped`, and append a row whose column 2 is a literal `=` followed by the archive name that\n    manifest_name_for_hash gives for that sha256.\n 5. Otherwise MOVE it into archive/ under the name next_name gives, where the set of already-claimed\n    names is the union of: every name currently present directly inside archive/, every column-2\n    value in the manifest that does NOT begin with `=`, and every name this run has already\n    claimed. Append its row and count it in `moved`.\n 6. Rows are appended with manifest_add in processing order. No file may be overwritten or lost, and\n    file contents must be unchanged by the move.\n 7. Print exactly three lines to stdout and exit 0:\n        moved: N\n        skipped: M\n        deduped: D\n 8. Running it again immediately must do nothing: `moved: 0`, `deduped: 0`, and a byte-identical\n    manifest. (`skipped` will be larger the second time, because rule 3 then catches the files\n    rule 4 recorded.)\n\nAND ONE MORE MODE. `bin/collect.sh --verify` changes NOTHING on disk. It reads the manifest,\nIGNORING every row whose column 2 begins with `=`, and reports the remaining rows whose archive file\nis not there any more, or whose file's size in bytes differs from the size the row recorded, one\nline per bad row on stdout:\n\n        missing: <archive name>\n        size: <archive name> <recorded size> <actual size>\n\nsorted by archive name byte-wise ascending under LC_ALL=C. It exits 1 when it printed at least one\nline and 0 when the manifest is clean. With no manifest file at all it prints nothing and exits 0.\nAny other argument is an error: `unknown option: <arg>` on stderr, exit 2.\n\nNames in this tree contain spaces and non-ASCII bytes; no name contains a TAB or a newline. Nothing\nmay be word-split or globbed. Do not create a differently named script: bin/collect.sh is the entry\npoint. Do not delete incoming/, and do not change the contents of any file inside it.\n\nRun `bash t/run_all.sh` and `./bin/collect.sh` yourself and read their output before you finish.",
+  "setup": {
+    "files": {
+      "bin/collect.sh": "#!/usr/bin/env bash\n# bin/collect.sh -- archive every *.log out of incoming/.\n# KNOWN BROKEN: word-splits names, ignores the manifest, clobbers duplicates.\nset -u\n. lib/naming.sh\n. lib/manifest.sh\n\nmkdir -p archive\ndeclare -A TAKEN\nmoved=0\nfor f in $(find incoming -name '*.log'); do\n  b=$(basename $f)\n  n=$(next_name $b)\n  mv $f archive/$n\n  moved=$((moved + 1))\ndone\necho \"moved: $moved\"\n",
+      "lib/naming.sh": "# lib/naming.sh -- pick a free destination name in archive/.\n# next_name BASENAME  prints the name to use. The caller keeps the set of names\n# that are already claimed in the associative array TAKEN (the keys are names).\n# KNOWN BROKEN: t/test_naming.sh does not pass.\n\nnext_name() {\n  local base=$1 stem ext n cand\n  case \"$base\" in\n    *.*) stem=${base%.*}; ext=\".${base##*.}\" ;;\n    *)   stem=$base; ext= ;;\n  esac\n  cand=$base\n  n=1\n  while [ -n \"${TAKEN[$cand]+x}\" ]; do\n    n=$((n + 1))\n    cand=\"$stem-$n$ext\"\n  done\n  printf '%s' \"$cand\"\n}\n",
+      "lib/manifest.sh": "# lib/manifest.sh -- the archive's append-only record.\n# Four TAB-separated columns: source path relative to incoming/, archive name, size in bytes,\n# and the sha256 of the content.\n# KNOWN BROKEN: t/test_manifest.sh does not pass.\n\nMANIFEST=archive/manifest.tsv\n\nmanifest_has() {                 # 0 when this source path was already recorded\n  local want=$1\n  [ -f \"$MANIFEST\" ] || return 1\n  cut -f1 \"$MANIFEST\" | grep -qx \"$want\"\n}\n\nmanifest_names() {               # every archive name ever recorded, one per line, in file order\n  [ -f \"$MANIFEST\" ] || return 0\n  cut -f2 \"$MANIFEST\"\n}\n\nmanifest_name_for_hash() {       # print the archive name of the FIRST row with this sha256,\n  local want=$1                  # and return 1 when no row has it\n  [ -f \"$MANIFEST\" ] || return 1\n  awk -F'\\t' '$4 == want { print $2; exit }' \"$MANIFEST\"\n}\n\nmanifest_add() {                 # manifest_add SOURCE_REL ARCHIVE_NAME SIZE SHA256\n  printf '%s\\t%s\\t%s\\t%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" >> \"$MANIFEST\"\n}\n",
+      "t/test_naming.sh": "#!/usr/bin/env bash\n# Rules for next_name. Do not edit this file.\nset -u\ncd \"$(dirname \"$0\")/..\"\n. lib/naming.sh\nfails=0\nchk() {                          # chk EXPECTED BASENAME [ALREADY_TAKEN...]\n  local exp=$1 base=$2 t got\n  shift 2\n  unset TAKEN; declare -gA TAKEN=()\n  for t in \"$@\"; do TAKEN[$t]=1; done\n  got=$(next_name \"$base\")\n  if [ \"$got\" = \"$exp\" ]; then\n    printf 'ok   next_name %-10s -> %s\\n' \"$base\" \"$got\"\n  else\n    printf 'FAIL next_name %-10s -> %s (want %s)\\n' \"$base\" \"$got\" \"$exp\"\n    fails=$((fails + 1))\n  fi\n}\nchk 'x.log'     'x.log'\nchk 'app-2.log' 'app.log'  'app.log'\nchk 'app-3.log' 'app.log'  'app.log' 'app-2.log'\nchk 'app.log'   'app.log'  'app-2.log'\nchk 'notes-2'   'notes'    'notes'\nchk 'a.b-2.c'   'a.b.c'    'a.b.c'\nchk '.x-2.log'  '.x.log'   '.x.log'\nchk '.hidden-2' '.hidden'  '.hidden'\nchk '.hidden-3' '.hidden'  '.hidden' '.hidden-2'\nprintf '%d failure(s)\\n' \"$fails\"\n[ \"$fails\" -eq 0 ]\n",
+      "t/test_manifest.sh": "#!/usr/bin/env bash\n# Rules for the manifest lookups. Do not edit this file.\nset -u\ncd \"$(dirname \"$0\")/..\"\n. lib/manifest.sh\ntmp=$(mktemp -d)\ntrap 'rm -rf \"$tmp\"' EXIT\nMANIFEST=$tmp/m.tsv\nprintf 'svc/dup.log\\tdup.log\\t5\\taaaa\\n'       >  \"$MANIFEST\"\nprintf 'a b/re[ad].log\\tre[ad].log\\t7\\tbbbb\\n' >> \"$MANIFEST\"\nprintf 'old/again.log\\tlater.log\\t5\\taaaa\\n'   >> \"$MANIFEST\"\nfails=0\nt() {\n  if eval \"$2\"; then printf 'ok   %s\\n' \"$1\"\n  else printf 'FAIL %s\\n' \"$1\"; fails=$((fails + 1)); fi\n}\nt 'exact source hit'        'manifest_has \"svc/dup.log\"'\nt 'a dot is not a wildcard' '! manifest_has \"svc/dupXlog\"'\nt 'brackets are literal'    'manifest_has \"a b/re[ad].log\"'\nt 'no bracket expansion'    '! manifest_has \"a b/red.log\"'\nt 'absent source'           '! manifest_has \"nope.log\"'\nt 'names in file order'     '[ \"$(manifest_names | tr \"\\n\" \",\")\" = \"dup.log,re[ad].log,later.log,\" ]'\nt 'hash lookup'             '[ \"$(manifest_name_for_hash bbbb)\" = \"re[ad].log\" ]'\nt 'first row wins'          '[ \"$(manifest_name_for_hash aaaa)\" = \"dup.log\" ]'\nt 'hash miss is empty'      '[ -z \"$(manifest_name_for_hash cccc)\" ]'\nt 'hash miss returns 1'     '! manifest_name_for_hash cccc'\nprintf '%d failure(s)\\n' \"$fails\"\n[ \"$fails\" -eq 0 ]\n",
+      "t/run_all.sh": "#!/usr/bin/env bash\n# Do not edit this file.\nset -u\ncd \"$(dirname \"$0\")/..\"\nrc=0\nfor t in t/test_naming.sh t/test_manifest.sh; do\n  printf '== %s\\n' \"$t\"\n  bash \"$t\" || rc=1\ndone\nif [ \"$rc\" -eq 0 ]; then printf 'ALL TESTS PASS\\n'; else printf 'TESTS FAILED\\n'; fi\nexit \"$rc\"\n",
+      "archive/manifest.tsv": "svc/dup.log\tdup.log\t5\td24bca799071676ae574814f0454e689e00f46d0ddd239391410f29889c8c445\ngone/x.log\tx.log\t9\t5265d277cfa915431492944041c1ffd6770c52a195f7e5582cdaa1aac9604aae\nold-run/old.log\told.log\t4\t144b85c70a192b8c9e428e83cf57eae38bb98495b59a7c6e2108fd0f18b908a1\n",
+      "archive/dup.log": "DUPSX\n",
+      "archive/old.log": "OLD\n",
+      "incoming/a b/app.log": "C\n",
+      "incoming/deep/one/two/caf\u00e9.log": "U\n",
+      "incoming/svc/.tail.log": "T\n",
+      "incoming/svc/app.log": "A\n",
+      "incoming/svc/dup.log": "D\n",
+      "incoming/svc/old.log": "OLD-NEW\n",
+      "incoming/x.log": "X\n",
+      "incoming/zz/app.log": "B\n",
+      "incoming/zz/copy.log": "DUPS\n",
+      "incoming/zz/same.log": "C\n",
+      "incoming/notes.txt": "N\n",
+      "incoming/svc/.hidden": "H\n",
+      "incoming/svc/app.log.bak": "BAK\n"
+    },
+    "commands": [
+      "chmod +x bin/collect.sh t/run_all.sh t/test_naming.sh t/test_manifest.sh",
+      "mkdir -p incoming/empty"
+    ]
+  },
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "max_tokens": 8000,
+  "checks": [
+    {
+      "type": "file_exists",
+      "path": "bin/collect.sh"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test -x bin/collect.sh"
+    },
+    {
+      "type": "command_output",
+      "cmd": "sha256sum t/run_all.sh t/test_manifest.sh t/test_naming.sh | awk '{print $1}' | tr '\\n' ' '",
+      "contains": "a743fc4ea0a521f75fa1923811cdc82a692d0f8aabb4d9e24e18eed8bc3a381b 56082703b4efaa17293f4d8bc535b4b475feaa8f1bd842e095b6099aa9fd6258 5723bf116ed991233dee13a8a7f24d65ad778c31447e6c31befe44a9d2675720"
+    },
+    {
+      "type": "command_output",
+      "cmd": "bash t/run_all.sh 2>&1",
+      "contains": "ALL TESTS PASS"
+    },
+    {
+      "type": "command_output",
+      "cmd": "./bin/collect.sh >/tmp/o 2>/tmp/e; rc=$?; printf 'moved: 7\\nskipped: 1\\ndeduped: 2\\n' >/tmp/x; [ $rc -eq 0 ] && diff /tmp/x /tmp/o && echo OK1",
+      "contains": "OK1"
+    },
+    {
+      "type": "command_output",
+      "cmd": "ls -A archive | LC_ALL=C sort | tr '\\n' '|'",
+      "contains": ".tail.log|app-2.log|app-3.log|app.log|caf\u00e9.log|dup.log|manifest.tsv|old-2.log|old.log|x-2.log|"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -c \"import base64;open('/tmp/m','wb').write(base64.b64decode('c3ZjL2R1cC5sb2cJZHVwLmxvZwk1CWQyNGJjYTc5OTA3MTY3NmFlNTc0ODE0ZjA0NTRlNjg5ZTAwZjQ2ZDBkZGQyMzkzOTE0MTBmMjk4ODljOGM0NDUKZ29uZS94LmxvZwl4LmxvZwk5CTUyNjVkMjc3Y2ZhOTE1NDMxNDkyOTQ0MDQxYzFmZmQ2NzcwYzUyYTE5NWY3ZTU1ODJjZGFhMWFhYzk2MDRhYWUKb2xkLXJ1bi9vbGQubG9nCW9sZC5sb2cJNAkxNDRiODVjNzBhMTkyYjhjOWU0MjhlODNjZjU3ZWFlMzhiYjk4NDk1YjU5YTdjNmUyMTA4ZmQwZjE4YjkwOGExCmEgYi9hcHAubG9nCWFwcC5sb2cJMgkxMmYzN2E4YTg0MDM0ZDNlNjIzZDcyNmZlMTBlNTAzMWY0ZGY5OTdhYzEzZjRkNTU3MWI1YTkwYzQxZmI4NGZlCmRlZXAvb25lL3R3by9jYWbDqS5sb2cJY2Fmw6kubG9nCTIJMzg1Y2ZiMGNjMjYyZGExZjdhZWI2YzNhYjZjNDJhZjcyYWNiYjZmMDE3NTUxMWUwZmZjNTVkNDA0Nzc5Y2RhZQpzdmMvLnRhaWwubG9nCS50YWlsLmxvZwkyCTY3OGY4MWE3MTRmYmM3MjAzMGY4MmY5OTgwMDU0ZDVjZjkwZTZmMDQxYTM2N2Y3ZGEyZjM1YjBmN2RhZmIwZTUKc3ZjL2FwcC5sb2cJYXBwLTIubG9nCTIJMDZmOTYxYjgwMmJjNDZlZTE2ODU1NWYwNjZkMjhmNGYwZTlhZmRmM2Y4ODE3NGMxZWU2ZjlkZTAwNGZjMzBhMApzdmMvb2xkLmxvZwlvbGQtMi5sb2cJOAk5MDI5NmU4OGI0NTJhMTkxZWZlMjE1NDNhZThlODFjNWY1NWVjNjFjYWU3YWI1MGQwNzFhZTJjYWU4ZmMyOTU4CngubG9nCXgtMi5sb2cJMgk3MDU4Mjk5NjI3MzY1ZmM3YTNkZDc4NDBmZDNkNTZmMjkzMDZjZDMwYzBmMmMxM2NiNTAwZmU3OTYxNzI5MGZmCnp6L2FwcC5sb2cJYXBwLTMubG9nCTIJYzBjZGU3N2ZhOGZlZjk3ZDQ3NmMxMGFhZDNkMmQ1NGZjYzJmMzM2MTQwZDA3MzY1MWMyZGNjY2YxZTM3OWZkNgp6ei9jb3B5LmxvZwk9ZHVwLmxvZwk1CWQyNGJjYTc5OTA3MTY3NmFlNTc0ODE0ZjA0NTRlNjg5ZTAwZjQ2ZDBkZGQyMzkzOTE0MTBmMjk4ODljOGM0NDUKenovc2FtZS5sb2cJPWFwcC5sb2cJMgkxMmYzN2E4YTg0MDM0ZDNlNjIzZDcyNmZlMTBlNTAzMWY0ZGY5OTdhYzEzZjRkNTU3MWI1YTkwYzQxZmI4NGZlCg=='))\" && cmp /tmp/m archive/manifest.tsv && echo OK2",
+      "contains": "OK2"
+    },
+    {
+      "type": "command_output",
+      "cmd": "printf '%s|%s|%s|%s|%s|%s\\n' \"$(cat 'archive/app.log')\" \"$(cat archive/app-2.log)\" \"$(cat archive/app-3.log)\" \"$(cat archive/old-2.log)\" \"$(cat archive/old.log)\" \"$(cat archive/x-2.log)\"",
+      "contains": "C|A|B|OLD-NEW|OLD|X"
+    },
+    {
+      "type": "command_output",
+      "cmd": "cat \"$(printf 'archive/caf\\xc3\\xa9.log')\" && cat archive/.tail.log",
+      "contains": "U"
+    },
+    {
+      "type": "command_output",
+      "cmd": "test -f incoming/zz/copy.log && test -f incoming/zz/same.log && [ \"$(cat incoming/zz/copy.log)\" = DUPS ] && [ \"$(find archive -maxdepth 1 -type f | wc -l)\" = 10 ] && [ \"$(cut -f2 archive/manifest.tsv | grep -c '^=')\" = 2 ] && echo OKD",
+      "contains": "OKD"
+    },
+    {
+      "type": "command_output",
+      "cmd": "test -f incoming/svc/dup.log && test -f incoming/notes.txt && test -f incoming/svc/.hidden && test -f incoming/svc/app.log.bak && test ! -e incoming/svc/app.log && test ! -e 'incoming/a b/app.log' && test ! -e incoming/x.log && echo OK3",
+      "contains": "OK3"
+    },
+    {
+      "type": "command_output",
+      "cmd": "./bin/collect.sh --verify >/tmp/v1 2>/dev/null; rc=$?; printf 'size: dup.log 5 6\\nmissing: x.log\\n' >/tmp/vx; [ $rc -eq 1 ] && diff /tmp/vx /tmp/v1 && ./bin/collect.sh --bogus 2>/tmp/v2 >/dev/null; [ $? -eq 2 ] && grep -qx 'unknown option: --bogus' /tmp/v2 && echo OKV1",
+      "contains": "OKV1"
+    },
+    {
+      "type": "command_output",
+      "cmd": "cp archive/manifest.tsv /tmp/mkeep && awk -F'\\t' '$1 != \"svc/dup.log\" && $1 != \"gone/x.log\"' /tmp/mkeep > archive/manifest.tsv && ./bin/collect.sh --verify >/tmp/v3 2>/dev/null; rc=$?; cp /tmp/mkeep archive/manifest.tsv; [ $rc -eq 0 ] && [ ! -s /tmp/v3 ] && echo OKV2",
+      "contains": "OKV2"
+    },
+    {
+      "type": "command_output",
+      "cmd": "cp archive/manifest.tsv /tmp/before && ./bin/collect.sh >/tmp/o2 2>&1; rc=$?; printf 'moved: 0\\nskipped: 3\\ndeduped: 0\\n' >/tmp/x2; [ $rc -eq 0 ] && diff /tmp/x2 /tmp/o2 && cmp /tmp/before archive/manifest.tsv && echo OK4",
+      "contains": "OK4"
+    },
+    {
+      "type": "command_output",
+      "cmd": "mv incoming incoming_away; ./bin/collect.sh 2>/tmp/e5 >/dev/null; rc=$?; mv incoming_away incoming; [ $rc -eq 2 ] && grep -qx 'error: no such directory: incoming' /tmp/e5 && echo OK5",
+      "contains": "OK5"
+    }
+  ],
+  "_turn_budget_note": "raised from 30 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

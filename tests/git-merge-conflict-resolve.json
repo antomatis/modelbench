@@ -1,0 +1,134 @@
+{
+  "id": "git-merge-conflict-resolve",
+  "category": "git",
+  "difficulty": "frontier",
+  "prompt": "/w is a git repository on branch `main`, with a branch `hotfix/rounding` cut from the first commit. Merge `hotfix/rounding` into `main` and resolve every conflict so that BOTH lines of work survive. Finish it as a real merge commit (two parents) whose subject line is exactly:\n  Merge branch 'hotfix/rounding'\n\nFour things collide, and each has one right answer. Note that git does not flag all four as conflicts - one of them merges quietly into a result that is wrong, so check what the merge actually produced rather than only what it complained about:\n\n1. `main` moved `util.py` to `lib/money.py` and made `apply_rate` round half UP; the hotfix edited `util.py` in place to make negative amounts truncate toward zero. Keep the move - `util.py` must not exist afterwards - and combine both behaviours: `apply_rate(cents, rate_pct)` must round half AWAY FROM ZERO. So `apply_rate(10, 5)` is 1, `apply_rate(-10, 5)` is -1, `apply_rate(9, 5)` is 0, `apply_rate(-9, 5)` is 0, and `apply_rate(-6995, 5)` is -350.\n\n2. `main` deleted `legacy_rates.py` and replaced it with `lib/rates.py`; the hotfix edited `legacy_rates.py` to raise the tax rate. Keep the deletion - `legacy_rates.py` must not exist afterwards - and carry the hotfix's value across: `lib/rates.py` must end up with `TAX_PCT = 21` and keep `MEMBER_PCT = 5`.\n\n3. Both sides MOVED `helpers.py`: `main` moved it to `lib/format.py` and taught `fmt_cents` to keep the sign of a negative amount; the hotfix moved the same file to `util/display.py` and gave `fmt_cents` a second parameter that right-aligns the result. Keep `main`'s path - afterwards `helpers.py` and `util/display.py` must both be gone and only `lib/format.py` may remain - and combine both behaviours into `fmt_cents(cents, width=0)`, which formats integer cents as a decimal string, keeps a leading `-` for negative amounts, and right-aligns the whole result in `width` columns (padding with spaces, never truncating). So `fmt_cents(-150)` is `-1.50`, `fmt_cents(5)` is `0.05`, `fmt_cents(-5)` is `-0.05`, `fmt_cents(0)` is `0.00`, `fmt_cents(12345, 9)` is `   123.45`, `fmt_cents(-12345, 9)` is `  -123.45`, and `fmt_cents(12345, 2)` is `123.45`.\n\n4. Both sides changed `total()` in /w/pricing.py. The merged signature must be exactly\n     def total(items, member=False, shipping_cents=0)\n   where `items` is a list of `(unit_price_cents, qty)` pairs, the member discount is `apply_rate(subtotal, MEMBER_PCT)` taken off the subtotal BEFORE tax, tax is `apply_rate(subtotal_after_discount, TAX_PCT)`, and `shipping_cents` is added at the very end and is never taxed or discounted. With items `[(1999, 3), (499, 2)]` that means: `total(items)` is 8464, `total(items, member=True)` is 8040, and `total(items, member=True, shipping_cents=500)` is 8540.\n\nBoth seeded test files must pass unmodified - do not edit anything under /w/tests/:\n  python3 tests/test_member.py && python3 tests/test_shipping.py\nThey import `apply_rate`, `TAX_PCT` and `MEMBER_PCT` from `pricing`, so pricing.py must keep importing those names from `lib.money` and `lib.rates`.\n\nWhen you are done: HEAD is on `main`, `git rev-list --count HEAD` is 5, the newest commit has two parents, no file contains a conflict marker, no `.orig` or `.rej` file exists anywhere, `git status --porcelain` prints nothing, and `git ls-files` prints exactly:\n  README.md\n  lib/__init__.py\n  lib/format.py\n  lib/money.py\n  lib/rates.py\n  pricing.py\n  tests/test_member.py\n  tests/test_shipping.py\n",
+  "setup": {
+    "files": {
+      "README.md": "# checkout\n\nInteger-cent checkout maths.\n",
+      "util.py": "def apply_rate(cents, rate_pct):\n    \"\"\"Apply a percentage rate to an integer cent amount.\"\"\"\n    return cents * rate_pct // 100\n",
+      "legacy_rates.py": "TAX_PCT = 19\n",
+      "pricing.py": "from util import apply_rate\nfrom legacy_rates import TAX_PCT\n\n\ndef total(items):\n    \"\"\"Cents due for `items`, a list of (unit_price_cents, qty) pairs.\"\"\"\n    subtotal = sum(price * qty for price, qty in items)\n    return subtotal + apply_rate(subtotal, TAX_PCT)\n",
+      "helpers.py": "def fmt_cents(cents):\n    \"\"\"Format integer cents as a decimal string.\"\"\"\n    return \"%d.%02d\" % (cents // 100, cents % 100)\n"
+    },
+    "commands": [
+      "git init -q -b main && git config user.email dev@example.com && git config user.name 'Dev Bot' && git config commit.gpgsign false && git config advice.detachedHead false && git config core.pager cat && git config merge.conflictstyle merge",
+      "git add -A && git commit -q -m \"chore(checkout): initial checkout maths\"",
+      "mkdir -p lib && git mv util.py lib/money.py",
+      "mkdir -p lib\ncat > lib/money.py <<'MBEOF'\ndef apply_rate(cents, rate_pct):\n    \"\"\"Apply a percentage rate to an integer cent amount, rounding half up.\"\"\"\n    return (cents * rate_pct + 50) // 100\nMBEOF",
+      "mkdir -p lib\ncat > lib/__init__.py <<'MBEOF'\n\nMBEOF",
+      "cat > pricing.py <<'MBEOF'\nfrom lib.money import apply_rate\nfrom legacy_rates import TAX_PCT\n\n\ndef total(items):\n    \"\"\"Cents due for `items`, a list of (unit_price_cents, qty) pairs.\"\"\"\n    subtotal = sum(price * qty for price, qty in items)\n    return subtotal + apply_rate(subtotal, TAX_PCT)\nMBEOF",
+      "git mv helpers.py lib/format.py",
+      "mkdir -p lib\ncat > lib/format.py <<'MBEOF'\ndef fmt_cents(cents):\n    \"\"\"Format integer cents as a decimal string, keeping the sign.\"\"\"\n    sign = \"-\" if cents < 0 else \"\"\n    amount = abs(cents)\n    return \"%s%d.%02d\" % (sign, amount // 100, amount % 100)\nMBEOF",
+      "git add -A && git commit -q -m \"refactor(money): move apply_rate into lib and round half up\"",
+      "git rm -q legacy_rates.py",
+      "mkdir -p lib\ncat > lib/rates.py <<'MBEOF'\nTAX_PCT = 19\nMEMBER_PCT = 5\nMBEOF",
+      "cat > pricing.py <<'MBEOF'\nfrom lib.money import apply_rate\nfrom lib.rates import TAX_PCT, MEMBER_PCT\n\n\ndef total(items, member=False):\n    \"\"\"Cents due for `items`, a list of (unit_price_cents, qty) pairs.\"\"\"\n    subtotal = sum(price * qty for price, qty in items)\n    if member:\n        subtotal -= apply_rate(subtotal, MEMBER_PCT)\n    return subtotal + apply_rate(subtotal, TAX_PCT)\nMBEOF",
+      "mkdir -p tests\ncat > tests/test_member.py <<'MBEOF'\nimport sys\n\nsys.dont_write_bytecode = True\nsys.path.insert(0, \"/w\")\n\nimport pricing\n\nfrom pricing import apply_rate, TAX_PCT, MEMBER_PCT\n\nsub = 6995\ndiscounted = sub - apply_rate(sub, MEMBER_PCT)\nassert pricing.total([(1999, 3), (499, 2)], member=True) == discounted + apply_rate(discounted, TAX_PCT)\nassert pricing.total([(1999, 3), (499, 2)]) == sub + apply_rate(sub, TAX_PCT)\nprint(\"MEMBER OK\")\nMBEOF",
+      "git add -A && git commit -q -m \"feat(rates): member discount and a rates module\"",
+      "git checkout -q -b hotfix/rounding $(git rev-list --max-parents=0 HEAD)",
+      "mkdir -p util && git mv helpers.py util/display.py",
+      "mkdir -p util\ncat > util/display.py <<'MBEOF'\ndef fmt_cents(cents, width=0):\n    \"\"\"Format integer cents as a decimal string, right-aligned in `width` columns.\"\"\"\n    text = \"%d.%02d\" % (cents // 100, cents % 100)\n    return text.rjust(width)\nMBEOF",
+      "cat > util.py <<'MBEOF'\ndef apply_rate(cents, rate_pct):\n    \"\"\"Apply a percentage rate to an integer cent amount, truncating toward zero.\"\"\"\n    if cents < 0:\n        return -((-cents * rate_pct) // 100)\n    return cents * rate_pct // 100\nMBEOF",
+      "cat > legacy_rates.py <<'MBEOF'\nTAX_PCT = 21\nMBEOF",
+      "cat > pricing.py <<'MBEOF'\nfrom util import apply_rate\nfrom legacy_rates import TAX_PCT\n\n\ndef total(items, shipping_cents=0):\n    \"\"\"Cents due for `items`, a list of (unit_price_cents, qty) pairs.\"\"\"\n    subtotal = sum(price * qty for price, qty in items)\n    return subtotal + apply_rate(subtotal, TAX_PCT) + shipping_cents\nMBEOF",
+      "mkdir -p tests\ncat > tests/test_shipping.py <<'MBEOF'\nimport sys\n\nsys.dont_write_bytecode = True\nsys.path.insert(0, \"/w\")\n\nimport pricing\n\nfrom pricing import apply_rate, TAX_PCT\n\nsub = 1000\nassert pricing.total([(1000, 1)], shipping_cents=500) == sub + apply_rate(sub, TAX_PCT) + 500\nassert pricing.total([(1000, 1)], shipping_cents=0) == sub + apply_rate(sub, TAX_PCT)\nprint(\"SHIPPING OK\")\nMBEOF",
+      "git add -A && git commit -q -m \"fix(rates): tax is 21 percent and negatives truncate toward zero\"",
+      "git checkout -q main"
+    ]
+  },
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "timeout_s": 1200,
+  "network": false,
+  "checks": [
+    {
+      "type": "command_output",
+      "cmd": "git rev-parse --abbrev-ref HEAD",
+      "regex": "^main$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git rev-list --count HEAD",
+      "regex": "^5$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git log -1 --format=%P | wc -w",
+      "regex": "^2$"
+    },
+    {
+      "type": "command_output",
+      "cmd": "git log -1 --format=%s",
+      "regex": "^Merge branch 'hotfix/rounding'$"
+    },
+    {
+      "type": "file_absent",
+      "path": "util.py"
+    },
+    {
+      "type": "file_absent",
+      "path": "legacy_rates.py"
+    },
+    {
+      "type": "file_absent",
+      "path": "helpers.py"
+    },
+    {
+      "type": "file_absent",
+      "path": "util/display.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "lib/format.py"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test \"$(git ls-files | tr '\\n' '|')\" = \"README.md|lib/__init__.py|lib/format.py|lib/money.py|lib/rates.py|pricing.py|tests/test_member.py|tests/test_shipping.py|\""
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test -z \"$(git status --porcelain)\""
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "! grep -rn '<<<<<<<\\|>>>>>>>' --include='*.py' ."
+    },
+    {
+      "type": "file_count",
+      "glob": "**/*.orig",
+      "min": 0,
+      "max": 0
+    },
+    {
+      "type": "file_count",
+      "glob": "**/*.rej",
+      "min": 0,
+      "max": 0
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 tests/test_member.py && python3 tests/test_shipping.py",
+      "contains": "SHIPPING OK"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "git diff --quiet hotfix/rounding HEAD -- tests/test_shipping.py"
+    },
+    {
+      "type": "file_matches",
+      "path": "pricing.py",
+      "regex": "^def total\\(items, member=False, shipping_cents=0\\):"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 - <<'PY'\nimport sys\nsys.dont_write_bytecode = True\nsys.path.insert(0, \"/w\")\nimport pricing\nfrom lib.money import apply_rate\nfrom lib.rates import TAX_PCT, MEMBER_PCT\nassert TAX_PCT == 21 and MEMBER_PCT == 5, (TAX_PCT, MEMBER_PCT)\nassert apply_rate(10, 5) == 1, apply_rate(10, 5)\nassert apply_rate(-10, 5) == -1, apply_rate(-10, 5)\nassert apply_rate(9, 5) == 0\nassert apply_rate(-9, 5) == 0\nassert apply_rate(0, 21) == 0\nassert apply_rate(-6995, 5) == -350\nassert apply_rate(6995, 5) == 350\nassert pricing.total([]) == 0\nassert pricing.total([(1999, 3), (499, 2)]) == 8464, pricing.total([(1999, 3), (499, 2)])\nassert pricing.total([(1999, 3), (499, 2)], member=True) == 8040, pricing.total([(1999, 3), (499, 2)], member=True)\nassert pricing.total([(1999, 3), (499, 2)], member=True, shipping_cents=500) == 8540\nassert pricing.total([(1999, 3), (499, 2)], shipping_cents=500) == 8964\nfrom lib.format import fmt_cents\nassert fmt_cents(-150) == \"-1.50\", repr(fmt_cents(-150))\nassert fmt_cents(5) == \"0.05\"\nassert fmt_cents(-5) == \"-0.05\"\nassert fmt_cents(0) == \"0.00\"\nassert fmt_cents(12345, 9) == \"   123.45\", repr(fmt_cents(12345, 9))\nassert fmt_cents(-12345, 9) == \"  -123.45\", repr(fmt_cents(-12345, 9))\nassert fmt_cents(12345, 2) == \"123.45\"\nassert fmt_cents(-1) == \"-0.01\"\nprint(\"CHECKOUT OK\")\nPY",
+      "contains": "CHECKOUT OK"
+    }
+  ],
+  "_turn_budget_note": "raised from 28 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

@@ -1,0 +1,147 @@
+{
+  "id": "cmake-object-lib-static-and-shared",
+  "category": "cmake",
+  "difficulty": "frontier",
+  "prompt": "Write /w/CMakeLists.txt (cmake_minimum_required(VERSION 3.20), project(geom VERSION 1.4.2 LANGUAGES CXX), C++17) that compiles src/detail.cpp, src/geom.cpp and src/poly.cpp EXACTLY ONCE and ships both a static and a shared library built from those same object files, with a controlled export surface.\n\n1. add_library(geom_objs OBJECT src/detail.cpp src/geom.cpp src/poly.cpp), with POSITION_INDEPENDENT_CODE ON and include/ exposed via target_include_directories(geom_objs PUBLIC ...).\n2. ONE BUG. geom::regular_area(n, side) must return the area of a regular n-gon with the given side length, which is n*side*side / (4*tan(pi/n)). It does not; src/poly.cpp passes std::tan an angle in the wrong units, and src/detail.cpp already provides the helper that converts them. Fix src/poly.cpp so regular_area(6, 3.0) is 23.383 to three decimals, without changing any signature.\n3. Targets `geom_static` (STATIC) and `geom_shared` (SHARED), both built from $<TARGET_OBJECTS:geom_objs>, both with OUTPUT_NAME geom. geom_shared carries VERSION 1.4.2 and SOVERSION 1, so the build produces libgeom.so.1.4.2 with SONAME libgeom.so.1, plus the usual libgeom.so.1 and libgeom.so symlinks. Nothing may be compiled a second time to produce them: after a full build the whole build tree must contain exactly 4 object files - 4. HIDDEN BY DEFAULT. The object library is compiled with hidden visibility (CXX_VISIBILITY_PRESET hidden and VISIBILITY_INLINES_HIDDEN ON), and only the four public functions are re-exported. To do that, create the new header /w/include/geom/export.hpp defining a macro GEOM_API as __attribute__((visibility(\"default\"))), include it from include/geom/geom.hpp and include/geom/poly.hpp, and put GEOM_API on the declarations of geom::area_rect, geom::area_circle, geom::perimeter and geom::regular_area - and on nothing else. Do NOT annotate anything declared in include/geom/detail.hpp, and do not change any function's signature or behaviour. You may edit the headers. Of the .cpp files you may edit ONLY src/poly.cpp, and only to fix the defect described next.\n   The consequence, which is checked three ways: `nm -DC --defined-only` on the shared library lists geom::area_rect but NOT geom::detail::deg2rad; `nm -C` on the STATIC library still lists geom::detail::deg2rad, because it is the same object code; and the shared library exports EXACTLY four symbols from the geom namespace - `nm -D --defined-only --extern-only <lib> | grep -c ' T _ZN4geom'` is 4, no more and no fewer, so annotating extra declarations fails just as surely as annotating too few.\n5. A LINKER VERSION SCRIPT as well. Write /w/geom.map declaring a single version node `GEOM_1.4` whose `global:` list names the four public functions by their MANGLED C++ names - you get those by building once and reading them out with nm - and whose `local:` list is `*;`. Apply it to geom_shared only, with target_link_options(... PRIVATE -Wl,--version-script=...). After that, `nm -D --defined-only --extern-only` on the shared library shows exactly four `T` symbols tagged @@GEOM_1.4 and nothing else from the geom namespace. Both mechanisms must be in place: the hidden visibility properties of requirement 3 AND this version script.\n6. ALIAS targets `geom::geom` for geom_shared and `geom::geom_static` for geom_static. Two executables, both built from the SAME src/main.cpp and both printing the identical line: `shapes` links geom::geom and must be a real dynamic link (`readelf -d` shows a NEEDED entry for libgeom.so.1), and `shapes_static` links geom::geom_static and must have NO NEEDED entry mentioning libgeom at all. Compiling main.cpp twice, once per executable, is expected: the whole build tree ends up with exactly 5 object files - the three library objects plus one main.cpp object per executable.\n7. Output layout, set with CMAKE_ARCHIVE_OUTPUT_DIRECTORY / CMAKE_LIBRARY_OUTPUT_DIRECTORY / CMAKE_RUNTIME_OUTPUT_DIRECTORY: the archive at <build>/lib/libgeom.a, the shared library and its symlinks at <build>/lib/, the executables at <build>/bin/shapes and <build>/bin/shapes_static.\n\nDONE MEANS: `cmake -S . -B build && cmake --build build` succeeds, `./build/bin/shapes` prints exactly `rect=12.000 circle=12.566 perim=9.000 hex=23.383`, and `g++ -std=c++17 -Iinclude tools/probe_public.cpp build/lib/libgeom.a -o p && ./p` prints exactly `probe=15.000/4.000`.\nBuild out-of-source; leave no CMakeCache.txt in /w itself.",
+  "setup": {
+    "files": {
+      "include/geom/detail.hpp": "#pragma once\n// Internal helpers. These are implementation detail: they must NOT appear in the shared\n// library's dynamic symbol table.\nnamespace geom {\nnamespace detail {\ndouble pi();\ndouble deg2rad(double deg);\n}\n}\n",
+      "include/geom/geom.hpp": "#pragma once\nnamespace geom {\ndouble area_rect(double w, double h);\ndouble area_circle(double r);\n}\n",
+      "include/geom/poly.hpp": "#pragma once\n#include <vector>\nnamespace geom {\ndouble perimeter(const std::vector<double>& sides);\ndouble regular_area(int n, double side);\n}\n",
+      "src/detail.cpp": "#include \"geom/detail.hpp\"\nnamespace geom {\nnamespace detail {\ndouble pi() { return 3.14159265358979323846; }\ndouble deg2rad(double deg) { return deg * pi() / 180.0; }\n}\n}\n",
+      "src/geom.cpp": "#include \"geom/geom.hpp\"\n#include \"geom/detail.hpp\"\nnamespace geom {\ndouble area_rect(double w, double h) { return w * h; }\ndouble area_circle(double r) { return detail::pi() * r * r; }\n}\n",
+      "src/poly.cpp": "#include \"geom/poly.hpp\"\n#include \"geom/detail.hpp\"\n#include <cmath>\nnamespace geom {\ndouble perimeter(const std::vector<double>& sides) {\n    double s = 0.0;\n    for (double x : sides) s += x;\n    return s;\n}\ndouble regular_area(int n, double side) {\n    if (n < 3) return 0.0;\n    const double half = 180.0 / static_cast<double>(n);\n    return static_cast<double>(n) * side * side / (4.0 * std::tan(half));\n}\n}\n",
+      "src/main.cpp": "#include \"geom/geom.hpp\"\n#include \"geom/poly.hpp\"\n#include <cstdio>\nint main() {\n    std::printf(\"rect=%.3f circle=%.3f perim=%.3f hex=%.3f\\n\",\n                geom::area_rect(3.0, 4.0), geom::area_circle(2.0),\n                geom::perimeter({2.0, 3.0, 4.0}), geom::regular_area(6, 3.0));\n    return 0;\n}\n",
+      "tools/probe_public.cpp": "#include \"geom/geom.hpp\"\n#include \"geom/poly.hpp\"\n#include <cstdio>\nint main() {\n    std::printf(\"probe=%.3f/%.3f\\n\", geom::area_rect(3.0, 5.0), geom::regular_area(4, 2.0));\n    return 0;\n}\n",
+      "tools/probe_detail.cpp": "#include \"geom/detail.hpp\"\n#include <cstdio>\n// Calls an INTERNAL symbol. Linking this against the shared library must fail, because that\n// symbol is hidden there. Linking it against the static library must succeed.\nint main() {\n    std::printf(\"detail=%.5f\\n\", geom::detail::deg2rad(180.0));\n    return 0;\n}\n"
+    }
+  },
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "checks": [
+    {
+      "type": "file_matches",
+      "path": "CMakeLists.txt",
+      "regex": "add_library\\s*\\(\\s*geom_objs\\s+OBJECT"
+    },
+    {
+      "type": "file_matches",
+      "path": "CMakeLists.txt",
+      "regex": "TARGET_OBJECTS:geom_objs"
+    },
+    {
+      "type": "file_matches",
+      "path": "CMakeLists.txt",
+      "regex": "add_library\\s*\\(\\s*geom::geom\\s+ALIAS"
+    },
+    {
+      "type": "file_exists",
+      "path": "include/geom/export.hpp"
+    },
+    {
+      "type": "file_exists",
+      "path": "geom.map"
+    },
+    {
+      "type": "file_matches",
+      "path": "geom.map",
+      "regex": "GEOM_1\\.4"
+    },
+    {
+      "type": "file_matches",
+      "path": "CMakeLists.txt",
+      "regex": "version-script"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "if grep -q 'GEOM_API' include/geom/detail.hpp; then exit 1; fi; exit 0"
+    },
+    {
+      "type": "command_succeeds",
+      "timeout_s": 300,
+      "cmd": "rm -rf verify && cmake -S . -B verify >/dev/null && cmake --build verify -j4 >/dev/null"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test -f verify/lib/libgeom.a && test -f verify/lib/libgeom.so.1.4.2 && test -L verify/lib/libgeom.so.1 && test -L verify/lib/libgeom.so && test -f verify/bin/shapes"
+    },
+    {
+      "type": "command_output",
+      "cmd": "readelf -d verify/lib/libgeom.so.1.4.2 | grep SONAME",
+      "contains": "libgeom.so.1"
+    },
+    {
+      "type": "command_output",
+      "cmd": "readelf -d verify/bin/shapes | grep NEEDED",
+      "contains": "libgeom.so.1"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "if readelf -d verify/bin/shapes_static | grep NEEDED | grep -q libgeom; then echo STATIC-EXE-IS-DYNAMIC; else echo STATIC-EXE-SELF-CONTAINED; fi; ./verify/bin/shapes_static",
+      "regex": "STATIC-EXE-SELF-CONTAINED[\\s\\S]*rect=12\\.000 circle=12\\.566 perim=9\\.000 hex=23\\.383"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "echo \"EXPORTS=$(nm -D --defined-only --extern-only verify/lib/libgeom.so.1.4.2 | grep -c ' T _ZN4geom')\"",
+      "regex": "EXPORTS=\\s*4\\b"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "echo \"VERSIONED=$(nm -D --defined-only --extern-only verify/lib/libgeom.so.1.4.2 | grep -c ' T .*@@GEOM_1\\.4')\"",
+      "regex": "VERSIONED=\\s*4\\b"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 180,
+      "cmd": "rm -rf vcc && cmake -S . -B vcc -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null 2>&1; line=$(jq -r '.[]|select(.file|endswith(\"src/poly.cpp\"))|.command' vcc/compile_commands.json); case \"$line\" in *-fvisibility=hidden*) echo VIS-HIDDEN-ON;; *) echo VIS-HIDDEN-MISSING;; esac",
+      "contains": "VIS-HIDDEN-ON"
+    },
+    {
+      "type": "command_output",
+      "cmd": "./verify/bin/shapes",
+      "contains": "rect=12.000 circle=12.566 perim=9.000 hex=23.383"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "echo \"OBJECTS=$(find verify -name '*.o' | wc -l)\"",
+      "regex": "OBJECTS=\\s*5\\b"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "d=$(nm -DC --defined-only verify/lib/libgeom.so.1.4.2); if printf '%s' \"$d\" | grep -q 'geom::area_rect'; then echo PUBLIC-EXPORTED; fi; if printf '%s' \"$d\" | grep -q 'deg2rad'; then echo DETAIL-LEAKED; else echo DETAIL-HIDDEN; fi",
+      "regex": "PUBLIC-EXPORTED[\\s\\S]*DETAIL-HIDDEN"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "a=$(nm -C verify/lib/libgeom.a); if printf '%s' \"$a\" | grep -q 'deg2rad'; then echo STATIC-KEEPS-DETAIL; else echo STATIC-STRIPPED; fi",
+      "contains": "STATIC-KEEPS-DETAIL"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 180,
+      "cmd": "g++ -std=c++17 -Iinclude tools/probe_public.cpp verify/lib/libgeom.a -o /tmp/pp && /tmp/pp",
+      "contains": "probe=15.000/4.000"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 180,
+      "cmd": "if g++ -std=c++17 -Iinclude tools/probe_detail.cpp -Lverify/lib -lgeom -Wl,-rpath,$PWD/verify/lib -o /tmp/pd 2>/dev/null; then echo SHARED-LEAKS-DETAIL; else echo SHARED-HIDES-DETAIL; fi; if g++ -std=c++17 -Iinclude tools/probe_detail.cpp verify/lib/libgeom.a -o /tmp/pd2 2>/dev/null; then echo STATIC-LINKS-DETAIL; else echo STATIC-MISSING-DETAIL; fi",
+      "regex": "SHARED-HIDES-DETAIL[\\s\\S]*STATIC-LINKS-DETAIL"
+    },
+    {
+      "type": "file_absent",
+      "path": "CMakeCache.txt"
+    }
+  ],
+  "_turn_budget_note": "raised from 24 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

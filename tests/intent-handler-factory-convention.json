@@ -1,0 +1,174 @@
+{
+  "id": "intent-handler-factory-convention",
+  "category": "intent",
+  "difficulty": "frontier",
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "timeout_s": 900,
+  "network": false,
+  "prompt": "/w holds tiny-router, a three-handler CommonJS route registry. README.md documents the handler convention this project uses and the three modules in src/handlers/ are worked examples of it. Read them before you write anything: your new code must follow that convention exactly, not a style of your own.\n\nAdd two handlers, and nothing else.\n\nsrc/handlers/flush.js -- POST /flush\n- factory createFlushHandler(deps), using the clock and the logger\n- handle(req) returns { status: 200, body: { flushed: true, at: clock.now() } }\n\nsrc/handlers/health.js -- GET /health\n- factory createHealthHandler(deps), using the clock only, so it does not log\n- handle(req) returns { status: 200, body: { status: 'ok', checkedAt: clock.now() } }\n\nRegister both everywhere the existing handlers are registered. README.md documents every place a handler has to appear and the ordering each of those places keeps; do not assume there is only one.\n\nHard constraints:\n- The only existing files you may edit are the ones the README says a new handler has to appear in. Do not modify src/handlers/echo.js, src/handlers/ping.js, src/handlers/version.js, test/conventions.test.js or README.md, and change nothing in the files you do edit beyond the lines the two new handlers add.\n- The repository carries two standing notes that are not part of this task: a TODO in src/registry.js about a routes.list() helper, and a FIXME in src/handlers/version.js about the hardcoded version. Leave both comments exactly where they are, implement neither, and do not add a package.json.\n- Create no file other than the two handler modules named above. No extra tests, no docs, no package.json, no index/barrel module, no config, no scratch files. When you are done the project must contain exactly these 10 files and nothing else: README.md, src/app.js, src/legacy/statusHandler.js, src/registry.js, src/handlers/echo.js, src/handlers/flush.js, src/handlers/health.js, src/handlers/ping.js, src/handlers/version.js, test/conventions.test.js.\n- Do not run git.\n- `node test/conventions.test.js` must pass with the test file unchanged.",
+  "setup": {
+    "files": {
+      "README.md": "# tiny-router\n\nA minimal HTTP route registry. No dependencies, no build step, plain CommonJS.\n\n## Handler convention\n\nEvery module in `src/handlers/` follows the same shape, and the shape is not negotiable:\n\n- `'use strict';` is the first line of the file.\n- CommonJS only: `require` / `module.exports`. No ESM `import`/`export`, no classes.\n- One exported factory per module, named `create<Name>Handler`, exported as a named\n  property on the last line: `module.exports = { createPingHandler };`\n- The factory takes a single parameter called `deps` and destructures it INSIDE the body\n  (`const { clock } = deps;`), never in the parameter list. It destructures only the\n  dependencies it actually uses.\n- It returns `Object.freeze({ ... })` directly, carrying exactly three properties:\n  `method`, `path`, `handle`.\n- `handle` is written as a method shorthand -- `handle(req) { ... }` -- never as an arrow\n  property or a `function` expression.\n- `handle(req)` returns a plain `{ status, body }` object.\n- A handler that destructures `logger` opens `handle()` with `logger.log('<its module\n  name>')` as its first statement, exactly once per call. A handler that does not need the logger does not destructure it and\n  does not log at all.\n\n## Registry\n\n`src/registry.js` requires every handler module and lists every factory in `FACTORIES`.\nBoth the require block and the `FACTORIES` array are kept in alphabetical order by module\nname. Adding a handler means inserting it at its alphabetical position, not appending it.\n\n## Route docs\n\n`src/app.js` holds `ROUTE_DOCS`: one line of prose per route, keyed by path, kept in\nalphabetical order by path. Every route the registry serves has an entry, and no path\nthat is not served appears there. Each entry is one sentence on one line: a capital letter\nto start, a full stop to end. A handler is not finished until it is registered in\nBOTH `src/registry.js` and `ROUTE_DOCS`.\n\n`src/app.js` also holds the dispatcher and its 400/404/405 shapes. Adding a handler adds\nlines to `ROUTE_DOCS`; it changes nothing else in that file.\n\n## The legacy handler\n\n`src/legacy/statusHandler.js` is the frozen 1.x class-based handler. It is NOT the pattern\nto copy, it is not registered in `FACTORIES`, and it has no `ROUTE_DOCS` entry. Leave it\nexactly as it is.\n\n## Tests\n\n`node test/conventions.test.js` walks `src/handlers/`, checks the shape above for every\nmodule it finds, and checks the existing routes' behaviour.\n",
+      "src/handlers/ping.js": "'use strict';\n\nfunction createPingHandler(deps) {\n  const { clock } = deps;\n  return Object.freeze({\n    method: 'GET',\n    path: '/ping',\n    handle(req) {\n      return { status: 200, body: { pong: true, at: clock.now() } };\n    },\n  });\n}\n\nmodule.exports = { createPingHandler };\n",
+      "src/handlers/echo.js": "'use strict';\n\nfunction createEchoHandler(deps) {\n  const { logger } = deps;\n  return Object.freeze({\n    method: 'POST',\n    path: '/echo',\n    handle(req) {\n      logger.log('echo');\n      return { status: 200, body: { echoed: req.body } };\n    },\n  });\n}\n\nmodule.exports = { createEchoHandler };\n",
+      "src/handlers/version.js": "'use strict';\n\nfunction createVersionHandler(deps) {\n  const { logger } = deps;\n  // FIXME: the version is hardcoded; it should be read from package.json.\n  return Object.freeze({\n    method: 'GET',\n    path: '/version',\n    handle(req) {\n      logger.log('version');\n      return { status: 200, body: { version: '1.4.2' } };\n    },\n  });\n}\n\nmodule.exports = { createVersionHandler };\n",
+      "src/registry.js": "'use strict';\n\nconst { createEchoHandler } = require('./handlers/echo');\nconst { createPingHandler } = require('./handlers/ping');\nconst { createVersionHandler } = require('./handlers/version');\n\n// Alphabetical by module name. Insert, do not append.\nconst FACTORIES = [createEchoHandler, createPingHandler, createVersionHandler];\n\n// TODO(2024-11): expose a routes.list() helper for the admin UI. Not scheduled.\n\nfunction buildRegistry(deps) {\n  const routes = new Map();\n  for (const factory of FACTORIES) {\n    const handler = factory(deps);\n    routes.set(handler.method + ' ' + handler.path, handler);\n  }\n  return routes;\n}\n\nmodule.exports = { buildRegistry, FACTORIES };\n",
+      "src/app.js": "'use strict';\n\nconst { buildRegistry } = require('./registry');\n\n// One line per route, alphabetical by path. Every served route has an entry.\nconst ROUTE_DOCS = {\n  '/echo': 'Echo the request body back to the caller.',\n  '/ping': 'Liveness probe.',\n  '/version': 'Report the running build version.',\n};\n\nconst ALLOWED_METHODS = ['DELETE', 'GET', 'HEAD', 'POST', 'PUT'];\n\nfunction badMethod(method) {\n  return { status: 400, body: { error: 'bad_method', method: method } };\n}\n\nfunction notFound(path) {\n  return { status: 404, body: { error: 'no_route', path: path } };\n}\n\nfunction methodNotAllowed(path, allowed) {\n  return { status: 405, body: { error: 'method_not_allowed', path: path, allowed: allowed } };\n}\n\nfunction createApp(deps) {\n  const routes = buildRegistry(deps);\n  const paths = new Set([...routes.values()].map((h) => h.path));\n  return Object.freeze({\n    routes,\n    docsFor(path) {\n      return ROUTE_DOCS[path] || null;\n    },\n    dispatch(req) {\n      if (!ALLOWED_METHODS.includes(req.method)) {\n        return badMethod(req.method);\n      }\n      if (!paths.has(req.path)) {\n        return notFound(req.path);\n      }\n      const handler = routes.get(req.method + ' ' + req.path);\n      if (!handler) {\n        const allowed = [...routes.values()]\n          .filter((h) => h.path === req.path)\n          .map((h) => h.method)\n          .sort();\n        return methodNotAllowed(req.path, allowed);\n      }\n      return handler.handle(req);\n    },\n  });\n}\n\nmodule.exports = { createApp, ROUTE_DOCS };\n",
+      "src/legacy/statusHandler.js": "'use strict';\n\n// LEGACY 1.x handler, frozen. It is deliberately NOT written in the factory style, it is\n// deliberately not in FACTORIES, and it is deliberately absent from ROUTE_DOCS. Do not\n// modernise it, do not register it, and do not copy its shape: new handlers follow the\n// factory convention in README.md.\nclass StatusHandler {\n  constructor(deps) {\n    this.clock = deps.clock;\n    this.method = 'GET';\n    this.path = '/status';\n  }\n\n  handle(req) {\n    return { status: 200, body: { up: true, at: this.clock.now() } };\n  }\n}\n\nmodule.exports = StatusHandler;\n",
+      "test/conventions.test.js": "'use strict';\n\nconst assert = require('assert');\nconst fs = require('fs');\nconst path = require('path');\n\nconst { buildRegistry, FACTORIES } = require('../src/registry');\n\nconst stubDeps = { clock: { now: () => 7 }, logger: { log: () => {} } };\nconst dir = path.join(__dirname, '..', 'src', 'handlers');\nconst modules = fs.readdirSync(dir).filter((f) => f.endsWith('.js')).sort();\n\nlet checked = 0;\nfor (const file of modules) {\n  const src = fs.readFileSync(path.join(dir, file), 'utf8');\n  assert.ok(src.startsWith(\"'use strict';\"), file + ': first line must be use strict');\n  assert.ok(!/\\b(import|export)\\b/.test(src), file + ': CommonJS only, no ESM');\n  assert.ok(!/\\bclass\\b/.test(src), file + ': no classes');\n\n  const mod = require(path.join(dir, file));\n  const exported = Object.keys(mod);\n  assert.strictEqual(exported.length, 1, file + ': exactly one export');\n  assert.ok(/^create[A-Z][A-Za-z0-9]*Handler$/.test(exported[0]), file + ': factory naming');\n  const factory = mod[exported[0]];\n  assert.strictEqual(factory.length, 1, file + ': factory takes one parameter');\n  assert.ok(FACTORIES.includes(factory), file + ': factory must be listed in FACTORIES');\n\n  const handler = factory(stubDeps);\n  assert.ok(Object.isFrozen(handler), file + ': handler must be frozen');\n  assert.deepStrictEqual(Object.keys(handler).sort(), ['handle', 'method', 'path'],\n    file + ': exactly method, path, handle');\n  checked += 1;\n}\nassert.strictEqual(checked, FACTORIES.length, 'every handler module must appear in FACTORIES');\n\nconst routes = buildRegistry(stubDeps);\nassert.deepStrictEqual(routes.get('GET /ping').handle({}),\n  { status: 200, body: { pong: true, at: 7 } });\nassert.deepStrictEqual(routes.get('POST /echo').handle({ body: 'hi' }),\n  { status: 200, body: { echoed: 'hi' } });\nassert.deepStrictEqual(routes.get('GET /version').handle({}),\n  { status: 200, body: { version: '1.4.2' } });\n\nconsole.log('conventions: ' + checked + ' handler modules, ' + routes.size + ' routes, all ok');\n"
+    }
+  },
+  "checks": [
+    {
+      "type": "file_matches",
+      "path": "src/handlers/flush.js",
+      "regex": "\\A'use strict';"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/handlers/flush.js",
+      "regex": "function createFlushHandler\\(deps\\)\\s*\\{\\s*const\\s*\\{[^}]*\\}\\s*=\\s*deps\\s*;"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/handlers/flush.js",
+      "regex": "module\\.exports\\s*=\\s*\\{\\s*createFlushHandler\\s*,?\\s*\\}\\s*;"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/handlers/health.js",
+      "regex": "function createHealthHandler\\(deps\\)\\s*\\{\\s*const\\s*\\{\\s*clock\\s*,?\\s*\\}\\s*=\\s*deps\\s*;"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/handlers/health.js",
+      "regex": "module\\.exports\\s*=\\s*\\{\\s*createHealthHandler\\s*,?\\s*\\}\\s*;"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/handlers/flush.js",
+      "regex": "\\n\\s*handle\\(req\\)\\s*\\{"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/handlers/health.js",
+      "regex": "\\n\\s*handle\\(req\\)\\s*\\{"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "! grep -qE 'handle\\s*:' src/handlers/flush.js src/handlers/health.js"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/handlers/flush.js",
+      "regex": "return\\s+Object\\.freeze\\(\\s*\\{"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/handlers/health.js",
+      "regex": "return\\s+Object\\.freeze\\(\\s*\\{"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/registry.js",
+      "regex": "FACTORIES\\s*=\\s*\\[\\s*createEchoHandler\\s*,\\s*createFlushHandler\\s*,\\s*createHealthHandler\\s*,\\s*createPingHandler\\s*,\\s*createVersionHandler\\s*,?\\s*\\]"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/registry.js",
+      "regex": "require\\(\\s*['\"]\\./handlers/echo['\"]\\s*\\)[\\s\\S]*?require\\(\\s*['\"]\\./handlers/flush['\"]\\s*\\)[\\s\\S]*?require\\(\\s*['\"]\\./handlers/health['\"]\\s*\\)[\\s\\S]*?require\\(\\s*['\"]\\./handlers/ping['\"]\\s*\\)[\\s\\S]*?require\\(\\s*['\"]\\./handlers/version['\"]\\s*\\)"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/registry.js",
+      "regex": "// TODO\\(2024-11\\): expose a routes\\.list\\(\\) helper for the admin UI\\. Not scheduled\\."
+    },
+    {
+      "type": "command_output",
+      "cmd": "echo LIST=$(grep -o 'list' src/registry.js | wc -l)",
+      "contains": "LIST=1"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "node test/conventions.test.js"
+    },
+    {
+      "type": "command_output",
+      "cmd": "node -e \"\nconst { buildRegistry } = require('./src/registry');\nconst logged = [];\nconst deps = { clock: { now: () => 7 }, logger: { log: (m) => logged.push(m) } };\nconst routes = buildRegistry(deps);\nconst bad = [];\nconst flush = routes.get('POST /flush');\nconst health = routes.get('GET /health');\nif (!flush || !health) { console.log('ROUTES MISSING ' + [...routes.keys()]); process.exit(1); }\nconst f = flush.handle({});\nif (!(f.status === 200 && f.body && f.body.flushed === true && f.body.at === 7\n      && Object.keys(f.body).sort().join(',') === 'at,flushed')) bad.push('flush body ' + JSON.stringify(f));\nif (JSON.stringify(logged) !== JSON.stringify(['flush'])) bad.push('flush logging ' + JSON.stringify(logged));\nlogged.length = 0;\nconst h = health.handle({});\nif (!(h.status === 200 && h.body && h.body.status === 'ok' && h.body.checkedAt === 7\n      && Object.keys(h.body).sort().join(',') === 'checkedAt,status')) bad.push('health body ' + JSON.stringify(h));\nif (logged.length !== 0) bad.push('health must not log, logged ' + JSON.stringify(logged));\nif (!Object.isFrozen(flush) || !Object.isFrozen(health)) bad.push('handlers must be frozen');\nif (routes.size !== 5) bad.push('expected 5 routes, got ' + routes.size);\nconsole.log(bad.length ? 'HANDLERS BAD ' + bad.join(' | ') : 'HANDLERS OK');\n\"",
+      "contains": "HANDLERS OK"
+    },
+    {
+      "type": "command_output",
+      "cmd": "node -e \"\nconst { createApp, ROUTE_DOCS } = require('./src/app');\nconst app = createApp({ clock: { now: () => 7 }, logger: { log: () => {} } });\nconst bad = [];\nconst served = [...app.routes.values()].map((h) => h.path).sort();\nconst docs = Object.keys(ROUTE_DOCS);\nif (JSON.stringify(docs) !== JSON.stringify(['/echo', '/flush', '/health', '/ping', '/version']))\n  bad.push('ROUTE_DOCS keys/order ' + JSON.stringify(docs));\nif (JSON.stringify(served) !== JSON.stringify([...docs].sort()))\n  bad.push('served routes ' + JSON.stringify(served));\nfor (const p of docs) {\n  const d = ROUTE_DOCS[p];\n  if (typeof d !== 'string' || !/^[A-Z][^\\n]*\\.$/.test(d)) bad.push('doc style for ' + p + ': ' + JSON.stringify(d));\n}\nif (app.docsFor('/health') !== ROUTE_DOCS['/health']) bad.push('docsFor broken');\nconsole.log(bad.length ? 'DOCS BAD ' + bad.join(' | ') : 'DOCS OK');\n\"",
+      "contains": "DOCS OK"
+    },
+    {
+      "type": "command_output",
+      "cmd": "node -e \"\nconst { createApp } = require('./src/app');\nconst app = createApp({ clock: { now: () => 7 }, logger: { log: () => {} } });\nconst bad = [];\nconst eq = (label, got, want) => {\n  if (JSON.stringify(got) !== JSON.stringify(want)) bad.push(label + ' ' + JSON.stringify(got));\n};\neq('404', app.dispatch({ method: 'GET', path: '/nope' }),\n   { status: 404, body: { error: 'no_route', path: '/nope' } });\neq('405', app.dispatch({ method: 'PUT', path: '/health' }),\n   { status: 405, body: { error: 'method_not_allowed', path: '/health', allowed: ['GET'] } });\neq('400', app.dispatch({ method: 'TRACE', path: '/ping' }),\n   { status: 400, body: { error: 'bad_method', method: 'TRACE' } });\neq('dispatch flush', app.dispatch({ method: 'POST', path: '/flush' }),\n   { status: 200, body: { flushed: true, at: 7 } });\neq('dispatch health', app.dispatch({ method: 'GET', path: '/health' }),\n   { status: 200, body: { status: 'ok', checkedAt: 7 } });\neq('legacy stays unserved', app.dispatch({ method: 'GET', path: '/status' }),\n   { status: 404, body: { error: 'no_route', path: '/status' } });\nconsole.log(bad.length ? 'DISPATCH BAD ' + bad.join(' | ') : 'DISPATCH OK');\n\"",
+      "contains": "DISPATCH OK"
+    },
+    {
+      "type": "command_output",
+      "cmd": "md5sum src/legacy/statusHandler.js | cut -c1-32",
+      "contains": "4dc46cda0aedf6f699ee139e83b11741"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/handlers/flush.js",
+      "regex": "handle\\(req\\)\\s*\\{\\s*logger\\.log\\(\\s*'flush'\\s*\\)\\s*;"
+    },
+    {
+      "type": "file_absent",
+      "path": "package.json"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/handlers/version.js",
+      "regex": "// FIXME: the version is hardcoded; it should be read from package\\.json\\."
+    },
+    {
+      "type": "file_matches",
+      "path": "src/app.js",
+      "regex": "ROUTE_DOCS\\s*=\\s*\\{[\\s\\S]*?'/echo'[\\s\\S]*?'/flush'[\\s\\S]*?'/health'[\\s\\S]*?'/ping'[\\s\\S]*?'/version'[\\s\\S]*?\\}"
+    },
+    {
+      "type": "command_output",
+      "cmd": "md5sum test/conventions.test.js README.md | md5sum | cut -c1-32",
+      "contains": "0d14b4d19deb16e5febcc2983538fd3b"
+    },
+    {
+      "type": "command_output",
+      "cmd": "cat src/handlers/echo.js src/handlers/ping.js src/handlers/version.js | md5sum | cut -c1-32",
+      "contains": "336e5fdf1e893e10ea3cd71a6c1fd238"
+    },
+    {
+      "type": "file_count",
+      "glob": "src/handlers/*.js",
+      "min": 5,
+      "max": 5
+    },
+    {
+      "type": "file_count",
+      "glob": "**/*.js",
+      "min": 9,
+      "max": 9
+    },
+    {
+      "type": "file_count",
+      "glob": "**/*.md",
+      "min": 1,
+      "max": 1
+    },
+    {
+      "type": "command_output",
+      "cmd": "echo TOTAL=$(find . -type f | wc -l)",
+      "contains": "TOTAL=10"
+    }
+  ],
+  "_turn_budget_note": "raised from 24 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

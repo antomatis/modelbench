@@ -1,0 +1,93 @@
+{
+  "id": "data-csv-quoting-to-tsv",
+  "category": "data",
+  "difficulty": "frontier",
+  "prompt": "raw/feed.csv is a CRM export written in a house dialect that Python's `csv` module gets wrong. docs/dialect.md is the authoritative specification of that dialect - implement exactly what it says. tests/test_dialect.py pins the behaviour and is part of the specification too; it fails right now, and you may not modify it.\n\nDeliver three things.\n\n1. etl/dialect.py - replace the stub with a real implementation of `parse(text) -> list[list]` (every field a str, or None for a NULL) and `dump(rows) -> str`, its exact inverse. `python3 tests/test_dialect.py` must print `OK test_dialect` with tests/test_dialect.py byte-for-byte unmodified. Python's `csv` module is banned: after you are done, no file under etl/ may contain an `import csv` or a `from csv import` line.\n\n2. etl/to_tsv.py - it takes exactly three command-line arguments, an input path, an output .tsv path and an output .json path, so that `python3 etl/to_tsv.py archive/feed.csv out/feed.tsv out/stats.json` parses the input through etl.dialect.parse and writes both outputs, creating any missing directory. It must work on any file in this dialect, not only this one - raw/edge.csv is a second, smaller input you can try it on.\n\n   The .tsv output - tab separated, no quoting anywhere, exactly one physical line per record, the header record first and then the data records in file order. Each field is rendered by replacing `\\` with `\\\\`, then tab with `\\t`, carriage return with `\\r`, and newline with `\\n` (two literal characters each) - in that order. A NULL field is rendered as the two characters `\\N` instead.\n\n   The .json output - {\"records\": <int>, \"nulls\": <int>, \"cities\": {<city>: <count>}, \"max_field_bytes\": <int>}. `records` counts data records only, not the header. `nulls` counts NULL fields across all data records. `cities` maps each distinct value of the `city` column in the data records to how many data records carry it. `max_field_bytes` is the largest UTF-8 byte length of any field value in any data record, where a NULL field has length 0.\n\n3. Move raw/feed.csv to archive/feed.csv, so that raw/feed.csv no longer exists. Leave raw/edge.csv where it is.\n\nThe file mixes CRLF record terminators with newlines that live inside quoted fields, so it has more physical lines than records; splitting on newlines or commas gives the wrong answer. Run your code and inspect the .tsv it produced before you finish.",
+  "setup": {
+    "files": {
+      "raw/feed.csv": "\ufeff# source: crm export v3\r\nid,name,note,city\r\n1,\"Smith, John\",\"He said \"\"hi\"\" and \\\"bye\\\"\",Vilnius\r\n2,\"O'Neil, Mary\",\"line one\nline two\",Kaunas\r\n3,Plain,\"\",Riga\r\n# a comment between records\r\n4,\"Quoted \"\"Q\"\"\",\"a,b,c\",Tallinn\r\n5,Last,note without quotes,Vilnius\r\n6,\\N,\\N,R\u012bga\r\n7,back\\\\slash,tab\\there,Vilnius\r\n8,\"ends with backslash \\\\\",\"#not a comment\",Kaunas\r\n9,comma\\,inside,plain,R\u012bga\r\n10,\"multi\n#hash inside\nend\",tail,Riga\r\n11,\"\\N\",unquoted \\N here,Vilnius\r\n\r\n12,\"quoted\"tail,plain,Kaunas\r\n",
+      "raw/edge.csv": "#edge cases\r\nid,name,note,city\r\ne1,\"b\"\"c\\\\\",\\N,Oslo\r\n\"#lead\",,x,Oslo\r\ne3,\"q\"z,\\N x,\"tab\\there\"\r\ne4,\"multi\nline, with comma\",\\N,R\u012bga\r\n",
+      "docs/dialect.md": "# The `crmcsv` dialect\n\nThis is NOT RFC 4180 and the Python `csv` module cannot parse it. Implement it exactly.\n\nThe text is UTF-8. If it begins with a BOM (U+FEFF) the BOM is not data.\n\n## Records\n\n* A record ends at `\\r\\n` or at `\\n`. A lone `\\r` outside a quoted field is ordinary data.\n* At the start of a record, a physical line whose first character is `#` is a COMMENT: the whole\n  physical line is discarded. A `#` anywhere else, including on a continuation line inside a\n  quoted field, is ordinary data.\n* At the start of a record, a completely empty physical line is discarded.\n* The first surviving record is the header.\n\n## Fields\n\nFields are separated by `,`.\n\nA field that begins with `\"` is QUOTED. Scan forward from after that quote:\n\n* `\"\"` produces one `\"` and scanning continues.\n* A backslash consumes the character after it: `\\n` produces a newline, `\\t` a tab, `\\r` a\n  carriage return, and any other `\\x` produces `x` (so `\\\"` is a quote and `\\\\` is a backslash).\n  A backslash escape is applied before the quote rules, so the `\"` in `\\\"` never closes a field\n  and the second backslash of `\\\\` never escapes anything.\n* A raw newline is ordinary data.\n* Any other `\"` closes the quoted part.\n\nAfter the closing quote, scanning CONTINUES in the unquoted rules below and whatever it produces\nis appended to the same field, so `\"quoted\"tail` is the single field `quotedtail`.\n\nAn UNQUOTED field, or the continuation after a closing quote, runs until a `,`, a `\\n`, or a `\\r`\nthat is immediately followed by `\\n` - whichever comes first - and the same backslash escapes\napply, so `a\\,b` is the single field `a,b`.\n\n## NULL\n\nA field is NULL if and only if it was never quoted and its raw text, before any unescaping, is\nexactly the two characters `\\N`. Everything else is a string, so the quoted field `\"\\N\"` is the\none-character string `N` and the unquoted field `x\\N` is the string `xN`.\n\n## Writing it back out\n\n`dump(rows)` renders records separated by `\\n`, with a trailing `\\n`, and each record is one\nphysical line. Each field:\n\n1. NULL is written as the two characters `\\N` and nothing else.\n2. Otherwise take the value and replace `\\` with `\\\\`, then newline with `\\n`, carriage return\n   with `\\r`, and tab with `\\t` (two characters each).\n3. The field is then QUOTED - wrapped in `\"` with every `\"` in the result doubled to `\"\"` - if\n   and only if the original value is the empty string, or contains `,` or `\"`, or the field is\n   the first field of its record and the original value starts with `#`. Otherwise it is written\n   bare.\n\n`parse(dump(rows)) == rows` must hold for every row list, including NULLs, empty strings,\nbackslashes, quotes, newlines and tabs.\n",
+      "etl/__init__.py": "",
+      "etl/dialect.py": "\"\"\"crmcsv dialect codec.\n\nPUBLIC API - both are required by tests/test_dialect.py:\n\n    parse(text) -> list[list]        each field is a str, or None for NULL\n    dump(rows)  -> str               inverse of parse\n\ndocs/dialect.md is the specification.\n\"\"\"\n\n\ndef parse(text):\n    raise NotImplementedError(\"parse() is not implemented yet - see docs/dialect.md\")\n\n\ndef dump(rows):\n    raise NotImplementedError(\"dump() is not implemented yet - see docs/dialect.md\")\n",
+      "tests/test_dialect.py": "\"\"\"Pinned behaviour of etl.dialect. Part of the specification; must pass unmodified.\"\"\"\nimport os\nimport sys\n\nsys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))\nfrom etl.dialect import parse, dump   # noqa: E402\n\nrows = parse('a,b\\n1,\"x,y\"\\n')\nassert rows == [[\"a\", \"b\"], [\"1\", \"x,y\"]], rows\n\nassert parse('q,\"He said \"\"hi\"\" and \\\\\"bye\\\\\"\"\\n') == [[\"q\", 'He said \"hi\" and \"bye\"']]\nassert parse('q,\"ends \\\\\\\\\",z\\n') == [[\"q\", \"ends \\\\\", \"z\"]]\nassert parse('q,\"quoted\"tail\\n') == [[\"q\", \"quotedtail\"]]\nassert parse(\"q,a\\\\,b\\n\") == [[\"q\", \"a,b\"]]\n\nassert parse(\"k,\\\\N\\n\") == [[\"k\", None]]\nassert parse('k,\"\\\\N\"\\n') == [[\"k\", \"N\"]]\nassert parse(\"k,x\\\\N\\n\") == [[\"k\", \"xN\"]]\n\nassert parse(\"# skip me\\nk,v\\n#skip\\n\") == [[\"k\", \"v\"]]\nassert parse('k,\"line\\n#not a comment\"\\n') == [[\"k\", \"line\\n#not a comment\"]]\nassert parse(\"k,v\\n\\n\\nk2,v2\\n\") == [[\"k\", \"v\"], [\"k2\", \"v2\"]]\nassert parse(\"\\ufeffk,v\\r\\nk2,v2\\r\\n\") == [[\"k\", \"v\"], [\"k2\", \"v2\"]]\n\nnasty = [\n    [\"#lead\", \"plain\", None],\n    [\"\", \"a,b\", 'has \"quotes\"'],\n    [\"back\\\\slash\", \"tab\\there\", \"nl\\nhere\"],\n    [\"\\\\N\", \"N\", \"cr\\rhere\"],\n]\ntext = dump(nasty)\nassert len(text.rstrip(\"\\n\").split(\"\\n\")) == len(nasty), \"one physical line per record\"\nassert parse(text) == nasty, (parse(text), nasty)\nassert parse(dump(parse(text))) == nasty\n\nprint(\"OK test_dialect\")\n"
+    }
+  },
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "checks": [
+    {
+      "type": "file_exists",
+      "path": "etl/dialect.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "etl/to_tsv.py"
+    },
+    {
+      "type": "file_absent",
+      "path": "raw/feed.csv"
+    },
+    {
+      "type": "file_exists",
+      "path": "archive/feed.csv"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "python3 tests/test_dialect.py | grep -q '^OK test_dialect$'"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "rm -rf out && python3 etl/to_tsv.py archive/feed.csv out/feed.tsv out/stats.json >/dev/null 2>&1 && test -s out/feed.tsv && test -s out/stats.json"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "python3 etl/to_tsv.py raw/edge.csv out/edge.tsv out/edge.json >/dev/null 2>&1 && test -s out/edge.tsv && test -s out/edge.json"
+    },
+    {
+      "type": "command_output",
+      "cmd": "md5sum tests/test_dialect.py | sed 's/^/PINNED /'",
+      "contains": "PINNED a3e0a7b1a44d41debe3fe194b2b2fde9  tests/test_dialect.py"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 - <<'PY'\nimport glob,re\nn=sum(1 for p in glob.glob('etl/*.py') if re.search(r'^\\s*(import\\s+csv|from\\s+csv\\s+import)', open(p).read(), re.M))\nprint('NOCSV %d' % n)\nPY",
+      "contains": "NOCSV 0"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 - <<'PY'\nt=open('out/feed.tsv',encoding='utf-8').read()\nrows=[r.split('\\t') for r in t.rstrip('\\n').split('\\n')]\nprint('TSV %d %s' % (len(rows), '|'.join('~'.join(r) for r in rows)))\nPY",
+      "contains": "TSV 13 id~name~note~city|1~Smith, John~He said \"hi\" and \"bye\"~Vilnius|2~O'Neil, Mary~line one\\nline two~Kaunas|3~Plain~~Riga|4~Quoted \"Q\"~a,b,c~Tallinn|5~Last~note without quotes~Vilnius|6~\\N~\\N~R\u012bga|7~back\\\\slash~tab\\there~Vilnius|8~ends with backslash \\\\~#not a comment~Kaunas|9~comma,inside~plain~R\u012bga|10~multi\\n#hash inside\\nend~tail~Riga|11~N~unquoted N here~Vilnius|12~quotedtail~plain~Kaunas"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 - <<'PY'\nimport json\nprint('STATS '+json.dumps(json.load(open('out/stats.json')),sort_keys=True,separators=(',',':'),ensure_ascii=False))\nPY",
+      "contains": "STATS {\"cities\":{\"Kaunas\":3,\"Riga\":2,\"R\u012bga\":2,\"Tallinn\":1,\"Vilnius\":4},\"max_field_bytes\":22,\"nulls\":2,\"records\":12}"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 - <<'PY'\nt=open('out/edge.tsv',encoding='utf-8').read()\nrows=[r.split('\\t') for r in t.rstrip('\\n').split('\\n')]\nprint('EDGETSV %d %s' % (len(rows), '|'.join('~'.join(r) for r in rows)))\nPY",
+      "contains": "EDGETSV 5 id~name~note~city|e1~b\"c\\\\~\\N~Oslo|#lead~~x~Oslo|e3~qz~N x~tab\\there|e4~multi\\nline, with comma~\\N~R\u012bga"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 - <<'PY'\nimport json\nprint('EDGESTATS '+json.dumps(json.load(open('out/edge.json')),sort_keys=True,separators=(',',':'),ensure_ascii=False))\nPY",
+      "contains": "EDGESTATS {\"cities\":{\"Oslo\":2,\"R\u012bga\":1,\"tab\\there\":1},\"max_field_bytes\":22,\"nulls\":2,\"records\":4}"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 - <<'PY'\nimport sys; sys.path.insert(0,'.')\nfrom etl.dialect import parse, dump\nrows=[['#x','',None],['a\"b','c,d','e\\\\f'],['g\\nh','i\\tj','\\\\N']]\nt=dump(rows)\nprint('DUMP '+t.replace('\\\\','<bs>').replace('\\n','<nl>').replace('\\t','<tab>'))\nprint('RT %s' % (parse(t)==rows))\nPY",
+      "contains": "DUMP \"#x\",\"\",<bs>N<nl>\"a\"\"b\",\"c,d\",e<bs><bs>f<nl>g<bs>nh,i<bs>tj,<bs><bs>N<nl>"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 - <<'PY'\nimport sys; sys.path.insert(0,'.')\nfrom etl.dialect import parse, dump\nrows=[['#x','',None],['a\"b','c,d','e\\\\f'],['g\\nh','i\\tj','\\\\N']]\nprint('RT %s' % (parse(dump(rows))==rows))\nPY",
+      "contains": "RT True"
+    }
+  ],
+  "_turn_budget_note": "raised from 28 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

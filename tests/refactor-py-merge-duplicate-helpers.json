@@ -1,0 +1,137 @@
+{
+  "id": "refactor-py-merge-duplicate-helpers",
+  "category": "refactor",
+  "difficulty": "frontier",
+  "prompt": "Three services grew three copies of the same idea. ingest/util.py, billing/util.py and\nreports/util.py each carry their own version_key() and satisfies(), each understands only the\nslice of the range grammar its own service happened to need, and all three are wrong in ways the\nothers are not. Replace all three with ONE correct implementation.\n\nPART 1 - the layout.\n\n  common/versions.py   version_key(text), compare(a, b), satisfies(version, spec),\n                       resolve(versions, spec) - the only implementation of any of them\n  common/__init__.py   re-exports those four names from common.versions (no re-implementation)\n  common/__main__.py   the CLI described in PART 3\n  (no other .py file under common/)\n\nDELETE ingest/util.py, billing/util.py and reports/util.py. Rewrite ingest/resolver.py,\nbilling/quota.py and reports/render.py to use common - their public functions pick(versions,\nspec), allowed(version, spec) and badge(versions, spec) keep their names, their signatures and\ntheir return types. \"def satisfies\" and \"def version_key\" must each appear exactly once in the\nwhole tree, and neither may appear anywhere under ingest/, billing/ or reports/.\n\nPART 2 - the semantics, which are semver 2.0 precedence plus an npm-style range grammar.\n\nA version is MAJOR.MINOR.PATCH, each a non-negative integer with no leading zeros, optionally\nfollowed by \"-PRERELEASE\" and optionally by \"+BUILD\". PRERELEASE and BUILD are dot-separated\nidentifiers of [0-9A-Za-z-]. Anything else raises ValueError(\"bad version: %s\" % text) - the\nthree old copies raise nothing and happily int() garbage.\n\nPrecedence:\n  * major, then minor, then patch, compared numerically (1.2.10 > 1.2.9);\n  * build metadata is IGNORED: compare(\"1.0.0+a\", \"1.0.0+b\") == 0;\n  * a version WITH a prerelease is lower than the same version without one;\n  * prereleases compare identifier by identifier, left to right: two numeric identifiers compare\n    numerically, a numeric identifier is lower than an alphanumeric one, two alphanumeric\n    identifiers compare by ASCII, and if one runs out first with everything equal so far, the\n    shorter one is lower.\n  So: 1.0.0-alpha < 1.0.0-alpha.1 < 1.0.0-alpha.beta < 1.0.0-beta < 1.0.0-beta.2 <\n      1.0.0-beta.11 < 1.0.0-rc.1 < 1.0.0.\n  version_key(text) returns whatever tuple makes sorted(versions, key=version_key) produce that\n  order; compare(a, b) returns -1, 0 or 1.\n\nA spec is one or more comparators separated by single spaces, ALL of which must hold:\n  *          any version\n  X.Y.Z      exactly that version (by precedence, so build metadata is ignored)\n  >=X.Y.Z    >X.Y.Z    <=X.Y.Z    <X.Y.Z       (the version may carry a prerelease)\n  ^X.Y.Z     >=X.Y.Z and less than the next release that changes the leftmost non-zero part:\n             ^1.2.3 -> <2.0.0, ^0.2.3 -> <0.3.0, ^0.0.3 -> <0.0.4\n  ~X.Y.Z     >=X.Y.Z <X.(Y+1).0\n  X.Y.x      >=X.Y.0 <X.(Y+1).0\n  X.x        >=X.0.0 <(X+1).0.0\nAnything else raises ValueError(\"bad spec: %s\" % spec), with the WHOLE spec in the message.\n\nThe prerelease rule, which none of the three copies has and which is the point of this exercise:\na version that carries a prerelease satisfies a spec only if some comparator in that spec names a\nversion that also carries a prerelease with the same major.minor.patch triple. So 1.3.1-rc.1 does\nNOT satisfy ^1.2.3 and 2.0.0-rc.1 does NOT satisfy \"<2.0.0\", but 2.0.0-rc.1 DOES satisfy\n\">=2.0.0-rc.0 <2.0.1\".\n\nresolve(versions, spec) returns the satisfying versions as a list in ascending precedence order;\nversions of equal precedence keep the order they were given in.\n\nPART 3 - the CLI. `python3 -m common <versions-file> <spec>` reads one version per line, skipping\nblank lines and lines starting with #, and prints every satisfying version in the order resolve\nreturns them, one per line, then a final line \"best=<the last of those versions>\", or \"best=-\"\nwhen none match. A bad spec or a bad version in the file prints \"error: <the ValueError message>\"\nto stderr and exits 1; otherwise it exits 0. data/versions.txt is the release list.\n\nThe grader runs that CLI with several specs it does not show you, and calls satisfies() directly\non versions that appear in no test file. Getting the four rules above right is the whole task.\n\nFROZEN, do not edit, do not delete: tests/test_services.py, tests/test_common.py,\ndata/versions.txt. `md5sum -c tests/frozen.md5` must still pass at the end. tests/test_services.py\npasses right now and must still pass afterwards - the three services may not change behaviour on\nthe inputs it uses. tests/test_common.py is a shape check, not an oracle: it will stay green while\nmost of PART 2 is still wrong.\n\n  python3 -m unittest discover -s tests -t . -q     # must be green\n",
+  "setup": {
+    "files": {
+      "billing/__init__.py": "",
+      "billing/quota.py": "\"\"\"Whether a customer's pinned release is still inside their plan window.\"\"\"\nfrom .util import satisfies\n\n\ndef allowed(version, spec):\n    return satisfies(version, spec)\n",
+      "billing/util.py": "\"\"\"billing's own version helpers (copy #2, forked from ingest's, then diverged).\"\"\"\n\n\ndef version_key(text):\n    head = text.split(\"+\")[0].split(\"-\")[0]\n    return tuple(int(p) for p in head.split(\".\"))\n\n\ndef satisfies(version, spec):\n    v = version_key(version)\n    for token in spec.split(\" \"):\n        if token[:2] in (\">=\", \"<=\"):\n            op, body = token[:2], token[2:]\n        elif token[:1] in (\">\", \"<\"):\n            op, body = token[:1], token[1:]\n        else:\n            op, body = \"=\", token\n        k = version_key(body)\n        if op == \">=\" and not v >= k:\n            return False\n        if op == \">\" and not v > k:\n            return False\n        if op == \"<=\" and not v <= k:\n            return False\n        if op == \"<\" and not v < k:\n            return False\n        if op == \"=\" and v != k:\n            return False\n    return True\n",
+      "data/versions.txt": "# every release we have ever published, in the order they were cut\n0.0.3\n0.0.4\n0.2.3\n0.2.9\n0.3.0\n1.0.0-alpha\n1.0.0-alpha.1\n1.0.0-alpha.beta\n1.0.0-beta\n1.0.0-beta.2\n1.0.0-beta.11\n1.0.0-rc.1\n1.0.0\n1.0.0+build.7\n1.2.3\n1.2.3+exp.sha.5114f85\n1.2.7\n1.2.10\n1.3.0\n1.3.1-rc.1\n1.3.1\n2.0.0-rc.1\n2.0.0\n2.1.0\n10.0.0\n",
+      "ingest/__init__.py": "",
+      "ingest/resolver.py": "\"\"\"Which release the ingest workers should pull.\"\"\"\nfrom .util import satisfies, version_key\n\n\ndef pick(versions, spec):\n    hits = sorted((v for v in versions if satisfies(v, spec)), key=version_key)\n    return hits[-1] if hits else None\n",
+      "ingest/util.py": "\"\"\"ingest's own version helpers (copy #1, written first, never revisited).\"\"\"\n\n\ndef version_key(text):\n    head = text.split(\"+\")[0].split(\"-\")[0]\n    return tuple(int(p) for p in head.split(\".\"))\n\n\ndef satisfies(version, spec):\n    v = version_key(version)\n    if spec.startswith(\"^\"):\n        base = version_key(spec[1:])\n        return base <= v < (base[0] + 1, 0, 0)\n    return v == version_key(spec)\n",
+      "reports/__init__.py": "",
+      "reports/render.py": "\"\"\"The version badge printed at the top of every report.\"\"\"\nfrom .util import satisfies, version_key\n\n\ndef badge(versions, spec):\n    hits = sorted((v for v in versions if satisfies(v, spec)), key=version_key)\n    return \"%s -> %s\" % (spec, hits[-1] if hits else \"none\")\n",
+      "reports/util.py": "\"\"\"reports' own version helpers (copy #3, pasted from billing, wildcards bolted on).\"\"\"\n\n\ndef version_key(text):\n    head = text.split(\"+\")[0].split(\"-\")[0]\n    return tuple(int(p) for p in head.split(\".\"))\n\n\ndef satisfies(version, spec):\n    v = version_key(version)\n    if spec == \"*\":\n        return True\n    if spec.endswith(\".x\"):\n        prefix = tuple(int(p) for p in spec[:-2].split(\".\"))\n        return v[:len(prefix)] == prefix\n    return v == version_key(spec)\n",
+      "tests/__init__.py": "",
+      "tests/frozen.md5": "1050c2c971dff13f296b869e4d132106  tests/test_services.py\n04adb1ec27b1170aafe310a2488b14d1  tests/test_common.py\n4c569a008027dc69b3fcaf43b64a9ca3  data/versions.txt\n",
+      "tests/test_common.py": "\"\"\"FROZEN smoke contract for the merged package. Do not edit.\n\nIt pins the SHAPE of common/ - module, names, types - and four obvious examples.\nIt is deliberately not an oracle: the precedence and range rules in the task\ndescription are what get graded, and this file stays green while most of them are wrong.\n\"\"\"\nimport unittest\n\nfrom common import compare, resolve, satisfies, version_key\nfrom common.versions import satisfies as satisfies_from_module\n\n\nclass TestShape(unittest.TestCase):\n    def test_reexports_are_the_same_objects(self):\n        self.assertIs(satisfies, satisfies_from_module)\n\n    def test_compare_returns_minus_one_zero_one(self):\n        self.assertEqual(compare(\"1.2.10\", \"1.2.9\"), 1)\n        self.assertEqual(compare(\"1.2.9\", \"1.2.10\"), -1)\n        self.assertEqual(compare(\"1.2.3\", \"1.2.3\"), 0)\n\n    def test_version_key_sorts(self):\n        self.assertEqual(sorted([\"1.2.10\", \"1.2.9\", \"1.10.0\"], key=version_key),\n                         [\"1.2.9\", \"1.2.10\", \"1.10.0\"])\n\n    def test_bad_version_raises(self):\n        with self.assertRaises(ValueError) as ctx:\n            version_key(\"1.2\")\n        self.assertIn(\"bad version: 1.2\", str(ctx.exception))\n\n    def test_satisfies_is_a_bool(self):\n        self.assertIs(satisfies(\"1.2.5\", \"^1.2.3\"), True)\n        self.assertIs(satisfies(\"2.0.0\", \"^1.2.3\"), False)\n\n    def test_resolve_returns_ascending_list(self):\n        self.assertEqual(resolve([\"1.3.0\", \"1.2.3\", \"1.2.7\"], \"^1.2.3\"),\n                         [\"1.2.3\", \"1.2.7\", \"1.3.0\"])\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+      "tests/test_services.py": "\"\"\"FROZEN service tests. Do not edit. These pass TODAY and must still pass afterwards:\nthe three services keep their public functions and their behaviour on these inputs.\n\"\"\"\nimport unittest\n\nfrom billing.quota import allowed\nfrom ingest.resolver import pick\nfrom reports.render import badge\n\nRELEASES = [\"1.2.3\", \"1.2.7\", \"1.2.10\", \"1.3.0\", \"2.0.0\", \"2.1.0\", \"10.0.0\"]\n\n\nclass TestIngest(unittest.TestCase):\n    def test_caret_picks_the_newest_compatible(self):\n        self.assertEqual(pick(RELEASES, \"^1.2.3\"), \"1.3.0\")\n\n    def test_exact_pin(self):\n        self.assertEqual(pick(RELEASES, \"1.2.7\"), \"1.2.7\")\n\n    def test_nothing_matches(self):\n        self.assertIsNone(pick(RELEASES, \"^3.0.0\"))\n\n    def test_numeric_not_lexical(self):\n        self.assertEqual(pick(RELEASES, \"^1.0.0\"), \"1.3.0\")\n\n\nclass TestBilling(unittest.TestCase):\n    def test_window(self):\n        self.assertTrue(allowed(\"1.5.0\", \">=1.2.0 <2.0.0\"))\n        self.assertFalse(allowed(\"2.0.0\", \">=1.2.0 <2.0.0\"))\n        self.assertTrue(allowed(\"2.0.0\", \">=1.2.0 <=2.0.0\"))\n\n    def test_open_ended(self):\n        self.assertTrue(allowed(\"10.0.0\", \">1.2.3\"))\n        self.assertFalse(allowed(\"1.2.3\", \">1.2.3\"))\n\n\nclass TestReports(unittest.TestCase):\n    def test_minor_wildcard(self):\n        self.assertEqual(badge(RELEASES, \"1.2.x\"), \"1.2.x -> 1.2.10\")\n\n    def test_star(self):\n        self.assertEqual(badge(RELEASES, \"*\"), \"* -> 10.0.0\")\n\n    def test_none(self):\n        self.assertEqual(badge(RELEASES, \"9.9.x\"), \"9.9.x -> none\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+    }
+  },
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "timeout_s": 1500,
+  "network": false,
+  "checks": [
+    {
+      "type": "file_absent",
+      "path": "ingest/util.py"
+    },
+    {
+      "type": "file_absent",
+      "path": "billing/util.py"
+    },
+    {
+      "type": "file_absent",
+      "path": "reports/util.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "common/versions.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "common/__main__.py"
+    },
+    {
+      "type": "file_count",
+      "glob": "common/*.py",
+      "min": 3,
+      "max": 3
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "md5sum -c tests/frozen.md5"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "for f in satisfies version_key; do test $(grep -rn \"^def $f\" --include='*.py' . | wc -l) -eq 1 || { echo \"def $f not unique\"; exit 1; }; done"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "! grep -rn 'def satisfies\\|def version_key' ingest billing reports"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "grep -rq 'common' ingest/resolver.py && grep -rq 'common' billing/quota.py && grep -rq 'common' reports/render.py"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m unittest discover -s tests -t . -q 2>&1; echo rc=$?",
+      "contains": "rc=0"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m common data/versions.txt '^1.2.3'",
+      "contains": "1.2.3\n1.2.3+exp.sha.5114f85\n1.2.7\n1.2.10\n1.3.0\n1.3.1\nbest=1.3.1"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m common data/versions.txt '1.0.x'",
+      "contains": "1.0.0\n1.0.0+build.7\nbest=1.0.0+build.7"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m common data/versions.txt '^0.2.3'",
+      "contains": "0.2.3\n0.2.9\nbest=0.2.9"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m common data/versions.txt '>=2.0.0-rc.0 <2.0.1'",
+      "contains": "2.0.0-rc.1\n2.0.0\nbest=2.0.0"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m common data/versions.txt '~1.2.3'",
+      "contains": "1.2.3\n1.2.3+exp.sha.5114f85\n1.2.7\n1.2.10\nbest=1.2.10"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m common data/versions.txt '^9.9.9'",
+      "contains": "best=-"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m common data/versions.txt 'not a spec' 2>&1 >/dev/null; echo rc=$?",
+      "contains": "error: bad spec: not a spec"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m common data/versions.txt 'not a spec' >/dev/null 2>&1; echo rc=$?",
+      "contains": "rc=1"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -c \"from common import satisfies as s; print(s('0.0.4','^0.0.3'), s('1.3.1-rc.1','^1.2.3'), s('1.0.0-x','*'), s('1.2.3+b','1.2.3'), s('0.2.9','^0.2.3'))\"",
+      "contains": "False False False True True"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -c \"from common import version_key as k; print(sorted(['1.0.0','1.0.0-rc.1','1.0.0-beta.11','1.0.0-beta.2','1.0.0-alpha.beta','1.0.0-alpha.1','1.0.0-alpha','1.0.0-beta'], key=k))\"",
+      "contains": "['1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-alpha.beta', '1.0.0-beta', '1.0.0-beta.2', '1.0.0-beta.11', '1.0.0-rc.1', '1.0.0']"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -c \"from common import version_key as k\nfor bad in ['1.2','1.02.3','1.2.3-','v1.2.3','1.2.3.4']:\n    try:\n        k(bad); print('ACCEPTED', bad)\n    except ValueError as e: print('rejected', bad)\"",
+      "contains": "rejected 1.2\nrejected 1.02.3\nrejected 1.2.3-\nrejected v1.2.3\nrejected 1.2.3.4"
+    }
+  ],
+  "_turn_budget_note": "raised from 30 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

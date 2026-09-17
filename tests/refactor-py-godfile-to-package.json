@@ -1,0 +1,119 @@
+{
+  "id": "refactor-py-godfile-to-package",
+  "category": "refactor",
+  "difficulty": "frontier",
+  "prompt": "booking.py is a god-file: record type, parser, interval merge, occupancy sweep, projector plan,\nreport and CLI in one place. Its docstring lists seven complaints the team has filed against it;\nevery one of them is a real defect. Break the file into a package AND make the numbers right.\nBoth halves are graded.\n\nPART 1 - the layout. Create exactly these modules, and no other .py file under booking/:\n\n  booking/__init__.py   re-exports, from the modules below, without re-implementing anything:\n                        Booking, parse_line, load, merge_windows, peak, choose, summarize,\n                        busiest, format_report\n  booking/model.py      the Booking record type only\n  booking/parse.py      parse_line(line) and load(path) only\n  booking/merge.py      merge_windows(intervals) only\n  booking/sweep.py      peak(bookings) only\n  booking/plan.py       choose(bookings) only\n  booking/report.py     summarize(bookings), busiest(summary), format_report(bookings)\n  booking/__main__.py   the CLI, so that `python3 -m booking data/bookings.txt` works\n\nDELETE booking.py. merge.py and sweep.py must import nothing from the booking package (no line\nin either may start with \"from .\" or \"import .\"). Each of \"def merge_windows\", \"def peak\",\n\"def choose\", \"def summarize\", \"def busiest\" and \"def parse_line\" must appear exactly once in\nthe whole tree.\n\nPART 2 - the semantics. A ledger line is `room|start|end|weight|tag`; blank lines and lines\nstarting with # are skipped. Times are integer minutes and may be negative. Every window is\nHALF-OPEN, [start, end): a booking ending at t and one starting at t do not overlap.\n\n  a. Booking is a frozen, ordered, hashable dataclass with the fields, in this order:\n     room (str), start (int), end (int), weight (int), tag (str).\n  b. parse_line raises ValueError(\"end before start: %s\" % stripped_line) when end < start; the\n     god-file silently swaps them. The CLI catches it, writes \"error: <message>\" to stderr and\n     exits 1, which is what `python3 -m booking data/bad.txt` must do.\n  c. merge_windows(intervals) takes an iterable of (start, end) pairs and returns a sorted list\n     of (start, end) tuples. Windows that overlap OR merely touch coalesce: [(0,5),(5,9)] ->\n     [(0,9)]. Empty windows (start == end) are dropped. It must not mutate its argument, and it\n     raises ValueError(\"end before start: (%d, %d)\" % (start, end)) on a reversed pair.\n  d. peak(bookings) returns (max_concurrent, when) over ALL rooms at once: the largest number of\n     bookings live at the same instant, and the EARLIEST time at which that number is reached.\n     Bookings with start == end are never live. With nothing live it returns (0, None).\n  e. choose(bookings) picks the projector schedule: return (total_weight, chosen) where chosen is\n     a list of Booking objects, no two of them overlapping, whose total weight is the maximum\n     achievable over the whole ledger. Touching bookings may both be chosen. Bookings with\n     start == end are never chosen. Ties are broken, in order: fewer bookings wins; then the\n     smaller list of (start, end, room, tag, weight) tuples compared lexicographically. chosen is\n     returned in ascending order of that same tuple. Greedy by weight does NOT give the maximum -\n     the whiteboard plan in the complaint list is real. It must not mutate its argument.\n  f. busiest(summary) returns the room with the most occupied minutes; ties go to the room with\n     more bookings, and if still tied to the lower room name. The god-file's max() picks by luck.\n  g. merge_windows and peak must be O(n log n): tests/perf_check.py runs both over 120,000\n     records and the god-file's implementations cannot finish it.\n\nPART 3 - the output. The report format is already right in the god-file and must not change, so\nkeep printing exactly these lines, in this order: rooms=, one \"room=...\" block per room sorted by\nname with its merged windows indented two spaces, total_minutes=, busiest=, peak=<n>@<t> (with\n\"-\" for <t> when there is no maximum), plan_weight=, and plan= holding the chosen bookings as\nroom:start:end:tag joined by commas (empty after the \"=\" when nothing is chosen).\n\ntests/golden_report.txt is the report your CLI must print for data/bookings.txt:\n\n    python3 -m booking data/bookings.txt | diff -u tests/golden_report.txt -\n\nmust print nothing and exit 0. The grader ALSO runs your CLI on data/bookings2.txt, for which no\ngolden file is supplied, and compares that output against the same rules applied by hand. Hard-\ncoding the golden file passes nothing.\n\nFROZEN, do not edit, do not delete: tests/test_contract.py, tests/perf_check.py,\ntests/golden_report.txt, data/bookings.txt, data/bookings2.txt, data/bad.txt. `md5sum -c\ntests/frozen.md5` must still pass when you are done. Fix your code, never the tests.\n\nThese must all pass from the repository root:\n  python3 -m unittest discover -s tests -t . -q\n  python3 -m tests.perf_check\n  python3 -m booking data/bookings.txt | diff -u tests/golden_report.txt -\n",
+  "setup": {
+    "files": {
+      "booking.py": "#!/usr/bin/env python3\n\"\"\"Room booking ledger - everything in one file, grown over two years.\n\n    python3 booking.py data/bookings.txt\n\nComplaints the team has filed against this script, none of them chased yet:\n\n  * finance says the occupancy numbers are too high for rooms booked\n    back-to-back all morning\n  * the 200-to-200 \"placeholder\" rows are cancellations, but they show up as\n    real windows and they even get picked for the projector plan\n  * two rooms with identical occupancy pick the \"busiest\" one by luck\n  * the projector plan is worth less than a plan somebody drew by hand on a\n    whiteboard, which should not be possible if this thing is optimal\n  * peak occupancy is reported one too high whenever a meeting ends exactly\n    when the next one starts\n  * somebody typed the end time before the start time once and the report\n    silently changed instead of complaining\n  * the 120k-line archive takes forever\n\"\"\"\nimport sys\n\n\nclass Booking(object):\n    def __init__(self, room, start, end, weight, tag):\n        self.room = room\n        self.start = start\n        self.end = end\n        self.weight = weight\n        self.tag = tag\n\n    def __repr__(self):\n        return \"Booking(%r, %d, %d, %d, %r)\" % (\n            self.room, self.start, self.end, self.weight, self.tag)\n\n\ndef parse_line(line):\n    text = line.strip()\n    if not text or text.startswith(\"#\"):\n        return None\n    parts = text.split(\"|\")\n    if len(parts) != 5:\n        raise ValueError(\"bad field count: %s\" % text)\n    room, start, end, weight, tag = (p.strip() for p in parts)\n    s, e = int(start), int(end)\n    if e < s:\n        s, e = e, s\n    return Booking(room, s, e, int(weight), tag)\n\n\ndef load(path):\n    out = []\n    fh = open(path, encoding=\"utf-8\")\n    for line in fh:\n        rec = parse_line(line)\n        if rec is not None:\n            out.append(rec)\n    fh.close()\n    return out\n\n\ndef merge_windows(intervals):\n    windows = [(s, e) for s, e in intervals]\n    changed = True\n    while changed:\n        changed = False\n        for i in range(len(windows)):\n            for j in range(len(windows)):\n                if i == j:\n                    continue\n                a, b = windows[i], windows[j]\n                if a[0] < b[1] and b[0] < a[1]:\n                    merged = (min(a[0], b[0]), max(a[1], b[1]))\n                    windows = ([w for k, w in enumerate(windows) if k not in (i, j)]\n                               + [merged])\n                    changed = True\n                    break\n            if changed:\n                break\n    return sorted(windows)\n\n\ndef peak(bookings):\n    events = []\n    for b in bookings:\n        events.append((b.start, 0))\n        events.append((b.end, 1))\n    events.sort()\n    cur = best = 0\n    at = None\n    for time, kind in events:\n        cur += 1 if kind == 0 else -1\n        if cur > best:\n            best, at = cur, time\n    return (best, at)\n\n\ndef choose(bookings):\n    picked = []\n    for b in sorted(bookings, key=lambda x: -x.weight):\n        clash = False\n        for p in picked:\n            if b.start < p.end and p.start < b.end:\n                clash = True\n                break\n        if not clash:\n            picked.append(b)\n    picked.sort(key=lambda b: (b.start, b.end, b.room, b.tag, b.weight))\n    return (sum(b.weight for b in picked), picked)\n\n\ndef summarize(bookings):\n    rooms = {}\n    for b in bookings:\n        rooms.setdefault(b.room, []).append(b)\n    summary = {}\n    for room, group in rooms.items():\n        windows = merge_windows([(b.start, b.end) for b in group])\n        summary[room] = {\n            \"bookings\": len(group),\n            \"windows\": windows,\n            \"minutes\": sum(e - s for s, e in windows),\n        }\n    return summary\n\n\ndef busiest(summary):\n    if not summary:\n        return None\n    return max(summary, key=lambda room: summary[room][\"minutes\"])\n\n\ndef format_report(bookings):\n    summary = summarize(bookings)\n    lines = [\"rooms=%d\" % len(summary)]\n    for room in sorted(summary):\n        v = summary[room]\n        lines.append(\"room=%s bookings=%d windows=%d minutes=%d\"\n                     % (room, v[\"bookings\"], len(v[\"windows\"]), v[\"minutes\"]))\n        for s, e in v[\"windows\"]:\n            lines.append(\"  [%d,%d)\" % (s, e))\n    lines.append(\"total_minutes=%d\" % sum(v[\"minutes\"] for v in summary.values()))\n    lines.append(\"busiest=%s\" % (busiest(summary) or \"-\"))\n    count, at = peak(bookings)\n    lines.append(\"peak=%d@%s\" % (count, \"-\" if at is None else at))\n    weight, chosen = choose(bookings)\n    lines.append(\"plan_weight=%d\" % weight)\n    lines.append(\"plan=%s\" % \",\".join(\n        \"%s:%d:%d:%s\" % (b.room, b.start, b.end, b.tag) for b in chosen))\n    return \"\\n\".join(lines) + \"\\n\"\n\n\ndef main(argv):\n    if len(argv) != 2:\n        sys.stderr.write(\"usage: python3 booking.py <ledger-file>\\n\")\n        return 2\n    try:\n        bookings = load(argv[1])\n    except ValueError as exc:\n        sys.stderr.write(\"error: %s\\n\" % exc)\n        return 1\n    sys.stdout.write(format_report(bookings))\n    return 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main(sys.argv))\n",
+      "data/bad.txt": "Atrium|0|30|2|ok\nAtrium|30|10|1|audit\n",
+      "data/bookings.txt": "# room|start|end|weight|tag   -- times are minutes past 09:00, windows are half-open [start,end)\nAtrium|-30|10|3|standup\nAtrium|10|45|4|design\n\nAtrium|60|135|5|review\nMain Hall|0|60|6|allhands\nMain Hall|30|90|2|breakout\nMain Hall|90|100|1|cleanup\nMain Hall|100|140|2|setup\nMain Hall|140|150|1|handover\nMain Hall|0|150|12|offsite\n# the placeholder below is a cancellation, not a booking\nBoardroom|200|200|9|placeholder\nBoardroom|5|55|7|board\nBoardroom|5|55|7|board\n\u0104\u017euolas|0|40|2|sync\n\u0104\u017euolas|40|75|3|sync\n\u0104\u017euolas|75|80|1|retro\n",
+      "data/bookings2.txt": "# a second ledger: the same rules, different shape\n\u0104\u017euolas|-120|-60|4|planning\n\u0104\u017euolas|-60|0|4|planning\n\u0104\u017euolas|-120|0|7|offsite\nLab 2|0|0|50|placeholder\nLab 2|10|20|5|burnin\nLab 2|20|30|5|burnin\nLab 2|10|30|10|soak\nLab 2|30|30|6|placeholder\nAtrium|-60|10|3|standup\nAtrium|40|40|8|cancelled\n",
+      "tests/__init__.py": "",
+      "tests/frozen.md5": "bf4ce56709334e6bdaf7687c4baa2ab6  tests/test_contract.py\nb75421c25421cadc05bbf5b151f1e08c  tests/perf_check.py\n017586ccbb27f891e6352dd5ac37b77b  tests/golden_report.txt\nc88f538b1e9d4210191424fd25fe12da  data/bookings.txt\n9f1f2cc656c03ed6eff916b324328691  data/bookings2.txt\na31ff855f88851e61b6c8299681b4382  data/bad.txt\n",
+      "tests/golden_report.txt": "rooms=4\nroom=Atrium bookings=3 windows=2 minutes=150\n  [-30,45)\n  [60,135)\nroom=Boardroom bookings=3 windows=1 minutes=50\n  [5,55)\nroom=Main Hall bookings=6 windows=1 minutes=150\n  [0,150)\nroom=\u0104\u017euolas bookings=3 windows=1 minutes=80\n  [0,80)\ntotal_minutes=430\nbusiest=Main Hall\npeak=7@30\nplan_weight=13\nplan=Boardroom:5:55:board,Atrium:60:135:review,Main Hall:140:150:handover\n",
+      "tests/perf_check.py": "\"\"\"FROZEN scale check. Do not edit. Run from the repository root:  python3 -m tests.perf_check\n\nThe archive ledger has 120k lines. The pairwise loop in the god-file cannot finish this, and\nneither can a peak() that rescans the whole list per event.\n\"\"\"\nimport random\nimport sys\n\nfrom booking.merge import merge_windows\nfrom booking.model import Booking\nfrom booking.sweep import peak\n\nN = 120000\nintervals = [(i * 2, i * 2 + 3) for i in range(N)]\nintervals += [(5, 7)] * 50\nintervals += [(9, 9)] * 50\nrandom.Random(7).shuffle(intervals)\nout = merge_windows(intervals)\nexpected = [(0, (N - 1) * 2 + 3)]\nif out != expected:\n    sys.stderr.write(\"PERF FAIL merge: %d windows, first %r\\n\" % (len(out), out[:2]))\n    raise SystemExit(1)\n\nrows = [Booking(room=\"r%d\" % (i % 7), start=i * 2, end=i * 2 + 3, weight=1, tag=\"t\")\n        for i in range(N)]\nrows += [Booking(room=\"z\", start=11, end=11, weight=1, tag=\"ghost\")] * 100\nrandom.Random(13).shuffle(rows)\ngot = peak(rows)\nif got != (2, 2):\n    sys.stderr.write(\"PERF FAIL peak: %r\\n\" % (got,))\n    raise SystemExit(1)\nprint(\"PERF OK windows=%d span=%d peak=%r\" % (len(out), out[0][1] - out[0][0], got))\n",
+      "tests/test_contract.py": "\"\"\"FROZEN smoke contract for the booking package. Do not edit this file.\n\nIt pins the SHAPE of the layout the refactor must produce - names, modules, types - and\nalmost nothing about behaviour. It is deliberately not an oracle: the rules in the task\ndescription, the report for data/bookings.txt and the report for data/bookings2.txt are\nwhat get graded, and this file will stay green while every one of them is wrong.\n\"\"\"\nimport unittest\n\nfrom booking import (Booking, busiest, choose, load, merge_windows, parse_line,\n                     peak, summarize)\nfrom booking.merge import merge_windows as merge_from_module\nfrom booking.model import Booking as Booking_from_module\n\n\ndef B(room, start, end, weight=1, tag=\"t\"):\n    return Booking(room=room, start=start, end=end, weight=weight, tag=tag)\n\n\nclass TestMerge(unittest.TestCase):\n    def test_single_and_empty(self):\n        self.assertEqual(merge_windows([(1, 2)]), [(1, 2)])\n        self.assertEqual(merge_windows([]), [])\n\n    def test_reversed_interval_raises(self):\n        with self.assertRaises(ValueError) as ctx:\n            merge_windows([(30, 10)])\n        self.assertIn(\"end before start: (30, 10)\", str(ctx.exception))\n\n    def test_input_is_not_mutated(self):\n        data = [(5, 9), (0, 5)]\n        merge_windows(data)\n        self.assertEqual(data, [(5, 9), (0, 5)])\n\n    def test_same_function_object_as_module(self):\n        self.assertIs(merge_windows, merge_from_module,\n                      \"booking/__init__.py must re-export, not re-implement\")\n\n\nclass TestPeak(unittest.TestCase):\n    def test_nothing(self):\n        self.assertEqual(peak([]), (0, None))\n        self.assertEqual(peak([B(\"A\", 5, 5, 9)]), (0, None))\n\n\n\nclass TestChoose(unittest.TestCase):\n    def test_returns_booking_objects_in_ascending_order(self):\n        rows = [B(\"A\", 50, 60, 1, \"b\"), B(\"A\", 0, 10, 1, \"a\")]\n        _weight, chosen = choose(rows)\n        self.assertTrue(all(isinstance(b, Booking) for b in chosen))\n        self.assertEqual([b.start for b in chosen], [0, 50])\n\n    def test_empty(self):\n        self.assertEqual(choose([]), (0, []))\n\n    def test_input_is_not_mutated(self):\n        rows = [B(\"A\", 50, 60, 1, \"b\"), B(\"A\", 0, 10, 1, \"a\")]\n        choose(rows)\n        self.assertEqual([b.tag for b in rows], [\"b\", \"a\"])\n\n\nclass TestParse(unittest.TestCase):\n    def test_comment_and_blank(self):\n        self.assertIsNone(parse_line(\"   \\n\"))\n        self.assertIsNone(parse_line(\"# a note\\n\"))\n\n    def test_fields_stripped(self):\n        b = parse_line(\"  Atrium | 10 | 45 | 4 | design \\n\")\n        self.assertEqual((b.room, b.start, b.end, b.weight, b.tag),\n                         (\"Atrium\", 10, 45, 4, \"design\"))\n\n    def test_reversed_line_raises(self):\n        with self.assertRaises(ValueError) as ctx:\n            parse_line(\"Atrium|30|10|1|audit\")\n        self.assertIn(\"end before start: Atrium|30|10|1|audit\", str(ctx.exception))\n\n    def test_bad_field_count_raises(self):\n        with self.assertRaises(ValueError):\n            parse_line(\"Atrium|30|10|audit\")\n\n\nclass TestModel(unittest.TestCase):\n    def test_booking_is_the_same_class_everywhere(self):\n        self.assertIs(Booking, Booking_from_module)\n\n    def test_booking_is_frozen(self):\n        b = B(\"A\", 0, 1)\n        with self.assertRaises(Exception):\n            b.start = 5\n\n    def test_booking_orders_and_compares_by_value(self):\n        self.assertEqual(B(\"A\", 0, 1), B(\"A\", 0, 1))\n        self.assertLess(B(\"A\", 0, 1), B(\"A\", 0, 2))\n        self.assertLess(B(\"A\", 9, 9), B(\"B\", 0, 0))\n\n    def test_booking_is_hashable(self):\n        self.assertEqual(len({B(\"A\", 0, 1), B(\"A\", 0, 1)}), 1)\n\n\nclass TestReport(unittest.TestCase):\n    def test_busiest_of_nothing_is_none(self):\n        self.assertIsNone(busiest(summarize([])))\n\n    def test_load_skips_comments_and_blanks(self):\n        self.assertEqual(len(load(\"data/bookings.txt\")), 15)\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+    }
+  },
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "timeout_s": 1500,
+  "network": false,
+  "checks": [
+    {
+      "type": "file_absent",
+      "path": "booking.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "booking/merge.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "booking/sweep.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "booking/plan.py"
+    },
+    {
+      "type": "file_exists",
+      "path": "booking/__main__.py"
+    },
+    {
+      "type": "file_count",
+      "glob": "booking/*.py",
+      "min": 8,
+      "max": 8
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "md5sum -c tests/frozen.md5"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "for f in merge_windows peak choose summarize busiest parse_line; do test $(grep -rn \"^def $f\" --include='*.py' . | wc -l) -eq 1 || { echo \"def $f not unique\"; exit 1; }; done"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "test $(cat booking/merge.py booking/sweep.py | grep -cE '^(from|import) *\\.') -eq 0"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m unittest discover -s tests -t . -q 2>&1; echo rc=$?",
+      "contains": "rc=0"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m tests.perf_check",
+      "contains": "PERF OK windows=1 span=240001 peak=(2, 2)",
+      "timeout_s": 90
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m booking data/bookings.txt | diff -u tests/golden_report.txt - && echo REPORT_MATCHES",
+      "contains": "REPORT_MATCHES"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m booking data/bookings2.txt",
+      "contains": "room=Lab 2 bookings=5 windows=1 minutes=20\n  [10,30)\nroom=\u0104\u017euolas bookings=3 windows=1 minutes=120\n  [-120,0)\ntotal_minutes=210\nbusiest=\u0104\u017euolas\npeak=3@-60\nplan_weight=18\nplan=\u0104\u017euolas:-120:-60:planning,\u0104\u017euolas:-60:0:planning,Lab 2:10:30:soak"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m booking data/bad.txt 2>&1 >/dev/null; echo rc=$?",
+      "contains": "error: end before start: Atrium|30|10|1|audit"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -m booking data/bad.txt >/dev/null 2>&1; echo rc=$?",
+      "contains": "rc=1"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -c \"from booking.merge import merge_windows as m; print(m([(5,5),(1,3),(3,4),(-2,-2),(-9,-4),(0,0),(2,2)]))\"",
+      "contains": "[(-9, -4), (1, 4)]"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -c \"import booking, booking.merge as m, booking.plan as p; print(booking.merge_windows is m.merge_windows, booking.choose is p.choose)\"",
+      "contains": "True True"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -c \"from booking import Booking as B, choose, peak; r=[B('A',0,100,10,'long'),B('B',0,50,6,'x'),B('B',50,100,6,'y'),B('C',7,7,99,'ghost')]; w,c=choose(r); print(w, [b.tag for b in c], peak(r))\"",
+      "contains": "12 ['x', 'y'] (2, 0)"
+    },
+    {
+      "type": "command_output",
+      "cmd": "python3 -c \"from booking import Booking as B, choose; r=[B('A',0,30,6,'one'),B('A',0,10,3,'s1'),B('A',10,30,3,'s2'),B('Z',200,210,4,'late'),B('A',205,215,4,'later')]; w,c=choose(r); print(w, [b.tag for b in c])\"",
+      "contains": "10 ['one', 'late']"
+    }
+  ],
+  "_turn_budget_note": "raised from 30 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

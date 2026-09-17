@@ -1,0 +1,116 @@
+{
+  "id": "cpp-break-include-cycle",
+  "category": "cpp",
+  "difficulty": "frontier",
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "prompt": "The campus project in /w does not build. include/room.hpp, include/door.hpp and include/keyring.hpp include one another; include/ledger.hpp is a header-only template; and campus::route is declared in include/campus.hpp and called from src/main.cpp but defined nowhere.\n\nPART 1 - header hygiene, applies to every file under include/.\n- No header may include another header of this project: when you are done, no file under include/ contains an `#include \"...\"` line. Angle-bracket standard library includes are fine, and each header must include the ones it needs.\n- The word `inline` must not appear anywhere under include/.\n- Every header must compile on its own: `echo '#include \"door.hpp\"' | g++ -std=c++20 -Iinclude -fsyntax-only -x c++ -` must succeed for each header, and likewise for the other four.\n- A member function that needs another class of this project moves out of line into src/<same stem>.cpp. Create src/room.cpp (holding Room::neighbours), src/door.cpp (holding Door::label) and src/keyring.cpp (holding Keyring::collectFrom), plus anything else that has to move with them. src/campus.cpp already exists.\n- Delete include/campus_all.hpp. Nothing may include it.\n- Public signatures and observable behaviour stay exactly as they are. Do NOT modify src/main.cpp.\n\nPART 2 - Ledger<T> must stop being a header-only template.\n- include/ledger.hpp keeps the class with member DECLARATIONS only, and ends the namespace with explicit instantiation declarations for exactly the two element types this project uses: `extern template class Ledger<int>;` and `extern template class Ledger<std::string>;`.\n- Create src/ledger.cpp holding the member definitions and the matching explicit instantiation definitions for those two types, and no others.\n- Consequence you must preserve: a translation unit that uses campus::Ledger<double> must still COMPILE but must FAIL TO LINK against src/ledger.cpp, while the same translation unit using campus::Ledger<int> links and runs.\n\nPART 3 - implement campus::route in src/campus.cpp. These rules are complete; there are no others.\n- A walk starts in room `from` and moves through doors. Traversing a door adds that door's cost() to the walk's total cost and counts as one step.\n- On entering a room you pick up the key that room holds, if it holds one. This includes the starting room. Keys are kept for the rest of the walk and are never used up.\n- A door whose lock colour is empty can always be traversed. A door with lock colour X can be traversed only while carrying a key of colour X.\n- A walk may pass through the same room, and the same door, more than once, with one limit: no room may be ENTERED more than twice in the whole walk. Arriving in the starting room at the very beginning counts as that room's first entry.\n- Among all legal walks from `from` to `to`, pick the best one by comparing, in this order: (1) smallest total cost, (2) then fewest steps, (3) then the smallest sequence of room names compared element by element, where the first position at which two sequences differ decides it by ordinary string comparison.\n- The result is the room names in walk order joined with '>', for example \"atrium>forge\". A walk from a room to itself has zero cost and zero steps and returns just that room name.\n- Return \"none\" if either name is not a room of this campus, or if no legal walk exists.\n\nThen `g++ -std=c++20 -Iinclude src/*.cpp -o app && ./app` must print exactly:\nrooms=7 doors=9\ngallery.neighbours=atrium,cellar,vault\nforge.door=atrium|forge\nkeys=blue,red n=2\ncosts=gallery=1;forge=2;annex=1;cellar=1 total=5\nwords=a=at;b=rium total=atrium\nr1=atrium>forge>atrium>gallery>vault\nr2=atrium>forge>atrium>cellar>gallery>vault>tower\nr3=gallery>atrium>cellar\nr4=none\nr5=atrium\nr6=none\nr7=cellar>atrium>forge>atrium>gallery>vault>tower\nr8=annex>atrium>forge>atrium>cellar>gallery>vault>tower",
+  "checks": [
+    {
+      "type": "file_exists",
+      "path": "src/room.cpp"
+    },
+    {
+      "type": "file_exists",
+      "path": "src/door.cpp"
+    },
+    {
+      "type": "file_exists",
+      "path": "src/keyring.cpp"
+    },
+    {
+      "type": "file_exists",
+      "path": "src/ledger.cpp"
+    },
+    {
+      "type": "file_absent",
+      "path": "include/campus_all.hpp"
+    },
+    {
+      "type": "file_count",
+      "glob": "include/*.hpp",
+      "min": 5,
+      "max": 8
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "! grep -rn '#include[[:space:]]*\"' include/"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "! grep -rnw 'inline' include/"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/room.cpp",
+      "regex": "Room::neighbours"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/door.cpp",
+      "regex": "Door::label"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/keyring.cpp",
+      "regex": "Keyring::collectFrom"
+    },
+    {
+      "type": "file_matches",
+      "path": "include/ledger.hpp",
+      "regex": "extern\\s+template\\s+class\\s+Ledger\\s*<\\s*int\\s*>\\s*;"
+    },
+    {
+      "type": "file_matches",
+      "path": "include/ledger.hpp",
+      "regex": "extern\\s+template\\s+class\\s+Ledger\\s*<\\s*std::string\\s*>\\s*;"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/main.cpp",
+      "regex": "r8=\\\"\\s*<<\\s*campus::route\\(c,\\s*\\\"annex\\\",\\s*\\\"tower\\\"\\)"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "for h in campus door keyring ledger room; do echo \"#include \\\"$h.hpp\\\"\" | g++ -std=c++20 -Iinclude -fsyntax-only -x c++ - || exit 1; done"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "printf '#include \"campus.hpp\"\\n#include \"door.hpp\"\\n#include \"keyring.hpp\"\\n#include \"ledger.hpp\"\\n#include \"room.hpp\"\\n' > /tmp/tu1.cpp && printf '#include \"campus.hpp\"\\n#include \"door.hpp\"\\n#include \"keyring.hpp\"\\n#include \"ledger.hpp\"\\n#include \"room.hpp\"\\nint main(){}\\n' > /tmp/tu2.cpp && g++ -std=c++20 -Iinclude /tmp/tu1.cpp /tmp/tu2.cpp -o /tmp/odrprobe"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "printf '#include \"ledger.hpp\"\\nint main(){ campus::Ledger<int> l; l.record(\"x\", 2); return (int)(l.size() + l.total() + l.report().size()); }\\n' > /tmp/pint.cpp && g++ -std=c++20 -Iinclude /tmp/pint.cpp src/ledger.cpp -o /tmp/pint"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "printf '#include \"ledger.hpp\"\\nint main(){ campus::Ledger<double> l; l.record(\"x\", 2.5); return (int)(l.size() + l.total() + l.report().size()); }\\n' > /tmp/pdbl.cpp && g++ -std=c++20 -Iinclude -fsyntax-only /tmp/pdbl.cpp && ! g++ -std=c++20 -Iinclude /tmp/pdbl.cpp src/ledger.cpp -o /tmp/pdbl 2>/dev/null"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "g++ -std=c++20 -Iinclude src/*.cpp -o app"
+    },
+    {
+      "type": "command_output",
+      "cmd": "g++ -std=c++20 -Iinclude src/*.cpp -o app_chk && ./app_chk",
+      "regex": "rooms=7\\ doors=9\\ngallery\\.neighbours=atrium,cellar,vault\\nforge\\.door=atrium\\|forge\\nkeys=blue,red\\ n=2\\ncosts=gallery=1;forge=2;annex=1;cellar=1\\ total=5\\nwords=a=at;b=rium\\ total=atrium\\nr1=atrium>forge>atrium>gallery>vault\\nr2=atrium>forge>atrium>cellar>gallery>vault>tower\\nr3=gallery>atrium>cellar\\nr4=none\\nr5=atrium\\nr6=none\\nr7=cellar>atrium>forge>atrium>gallery>vault>tower\\nr8=annex>atrium>forge>atrium>cellar>gallery>vault>tower"
+    }
+  ],
+  "setup": {
+    "files": {
+      "include/campus.hpp": "#ifndef CAMPUS_CAMPUS_HPP\n#define CAMPUS_CAMPUS_HPP\n\n#include <memory>\n#include <string>\n#include <vector>\n\n#include \"door.hpp\"\n#include \"keyring.hpp\"\n#include \"room.hpp\"\n\nnamespace campus {\n\n// Owns every room and door. Rooms and doors keep the order they were added in.\nclass Campus {\npublic:\n    Room& addRoom(std::string name, std::string keyColour = \"\");\n    Door& addDoor(const std::string& a, const std::string& b, std::string lockColour = \"\",\n                  int cost = 1);\n\n    const Room* find(const std::string& name) const;\n    std::size_t roomCount() const;\n    std::size_t doorCount() const;\n\nprivate:\n    std::vector<std::unique_ptr<Room>> rooms_;\n    std::vector<std::unique_ptr<Door>> doors_;\n};\n\n// Shortest walk from room `from` to room `to`; see the project brief for the rules.\nstd::string route(const Campus& c, const std::string& from, const std::string& to);\n\n}  // namespace campus\n\n#endif\n",
+      "include/campus_all.hpp": "#ifndef CAMPUS_ALL_HPP\n#define CAMPUS_ALL_HPP\n\n// Legacy umbrella header from before the project was split up. Every consumer now\n// includes the one header it needs, so this file has no reason to exist.\n#include \"campus.hpp\"\n#include \"door.hpp\"\n#include \"keyring.hpp\"\n#include \"ledger.hpp\"\n#include \"room.hpp\"\n\n#endif\n",
+      "include/door.hpp": "#ifndef CAMPUS_DOOR_HPP\n#define CAMPUS_DOOR_HPP\n\n#include <string>\n\n#include \"keyring.hpp\"\n#include \"room.hpp\"\n\nnamespace campus {\n\n// A door joins exactly two rooms. A non-empty lock colour means the door only\n// opens for somebody carrying a key of that colour. Walking through it costs cost().\nclass Door {\npublic:\n    Door(Room* a, Room* b, std::string lockColour, int cost)\n        : a_(a), b_(b), lock_(std::move(lockColour)), cost_(cost) {}\n\n    const std::string& lock() const { return lock_; }\n    int cost() const { return cost_; }\n\n    Room* other(const Room* from) const { return from == a_ ? b_ : a_; }\n\n    bool passable(const Keyring& ring) const { return lock_.empty() || ring.has(lock_); }\n\n    // \"<first room>|<second room>\", in the order the door was created.\n    std::string label() const { return a_->name() + \"|\" + b_->name(); }\n\nprivate:\n    Room* a_;\n    Room* b_;\n    std::string lock_;\n    int cost_;\n};\n\n}  // namespace campus\n\n#endif\n",
+      "include/keyring.hpp": "#ifndef CAMPUS_KEYRING_HPP\n#define CAMPUS_KEYRING_HPP\n\n#include <set>\n#include <string>\n\n#include \"room.hpp\"\n\nnamespace campus {\n\n// The keys somebody is carrying. Keys are never used up.\nclass Keyring {\npublic:\n    // Picks up the key held by that room, if it holds one.\n    void collectFrom(const Room& r) {\n        if (!r.key().empty()) keys_.insert(r.key());\n    }\n\n    bool has(const std::string& colour) const { return keys_.count(colour) != 0; }\n    std::size_t size() const { return keys_.size(); }\n\n    // Every carried colour, ascending, comma separated. Empty ring -> \"\".\n    std::string list() const {\n        std::string out;\n        for (const std::string& k : keys_) {\n            if (!out.empty()) out += \",\";\n            out += k;\n        }\n        return out;\n    }\n\nprivate:\n    std::set<std::string> keys_;\n};\n\n}  // namespace campus\n\n#endif\n",
+      "include/ledger.hpp": "#ifndef CAMPUS_LEDGER_HPP\n#define CAMPUS_LEDGER_HPP\n\n#include <cstddef>\n#include <sstream>\n#include <string>\n#include <utility>\n#include <vector>\n\nnamespace campus {\n\n// A small labelled tally. Only two element types are ever used on this campus.\ntemplate <typename T>\nclass Ledger {\npublic:\n    void record(std::string label, T value) {\n        entries_.emplace_back(std::move(label), std::move(value));\n    }\n\n    std::size_t size() const { return entries_.size(); }\n\n    // \"label=value\" per entry, in insertion order, joined by ';'.\n    std::string report() const {\n        std::ostringstream os;\n        bool first = true;\n        for (const auto& e : entries_) {\n            if (!first) os << \";\";\n            first = false;\n            os << e.first << \"=\" << e.second;\n        }\n        return os.str();\n    }\n\n    // T{} plus every recorded value, in insertion order.\n    T total() const {\n        T acc{};\n        for (const auto& e : entries_) acc += e.second;\n        return acc;\n    }\n\nprivate:\n    std::vector<std::pair<std::string, T>> entries_;\n};\n\n}  // namespace campus\n\n#endif\n",
+      "include/room.hpp": "#ifndef CAMPUS_ROOM_HPP\n#define CAMPUS_ROOM_HPP\n\n#include <string>\n#include <vector>\n\n#include \"door.hpp\"\n\nnamespace campus {\n\n// A room on the campus. A room may hold at most one key, named by its colour;\n// an empty colour means the room holds no key.\nclass Room {\npublic:\n    Room(std::string name, std::string keyColour)\n        : name_(std::move(name)), key_(std::move(keyColour)) {}\n\n    const std::string& name() const { return name_; }\n    const std::string& key() const { return key_; }\n\n    void attach(Door* d) { doors_.push_back(d); }\n    const std::vector<Door*>& doors() const { return doors_; }\n\n    // Names of the rooms on the far side of each attached door, sorted ascending.\n    std::vector<std::string> neighbours() const {\n        std::vector<std::string> out;\n        for (Door* d : doors_) out.push_back(d->other(this)->name());\n        std::sort(out.begin(), out.end());\n        return out;\n    }\n\nprivate:\n    std::string name_;\n    std::string key_;\n    std::vector<Door*> doors_;\n};\n\n}  // namespace campus\n\n#endif\n",
+      "src/campus.cpp": "#include \"campus.hpp\"\n\n#include <stdexcept>\n\nnamespace campus {\n\nRoom& Campus::addRoom(std::string name, std::string keyColour) {\n    rooms_.push_back(std::make_unique<Room>(std::move(name), std::move(keyColour)));\n    return *rooms_.back();\n}\n\nDoor& Campus::addDoor(const std::string& a, const std::string& b, std::string lockColour,\n                      int cost) {\n    Room* ra = nullptr;\n    Room* rb = nullptr;\n    for (auto& r : rooms_) {\n        if (r->name() == a) ra = r.get();\n        if (r->name() == b) rb = r.get();\n    }\n    if (!ra || !rb) throw std::runtime_error(\"addDoor: unknown room\");\n    doors_.push_back(std::make_unique<Door>(ra, rb, std::move(lockColour), cost));\n    Door* d = doors_.back().get();\n    ra->attach(d);\n    rb->attach(d);\n    return *d;\n}\n\nconst Room* Campus::find(const std::string& name) const {\n    for (const auto& r : rooms_)\n        if (r->name() == name) return r.get();\n    return nullptr;\n}\n\nstd::size_t Campus::roomCount() const { return rooms_.size(); }\nstd::size_t Campus::doorCount() const { return doors_.size(); }\n\n// route() is declared in campus.hpp and is not implemented anywhere yet.\n\n}  // namespace campus\n",
+      "src/main.cpp": "// The specification. Do not modify this file.\n#include <iostream>\n#include <string>\n#include <vector>\n\n#include \"campus.hpp\"\n#include \"door.hpp\"\n#include \"keyring.hpp\"\n#include \"ledger.hpp\"\n#include \"room.hpp\"\n\nstatic std::string join(const std::vector<std::string>& v) {\n    std::string out;\n    for (const std::string& s : v) {\n        if (!out.empty()) out += \",\";\n        out += s;\n    }\n    return out;\n}\n\nint main() {\n    campus::Campus c;\n    c.addRoom(\"atrium\");\n    c.addRoom(\"gallery\");\n    c.addRoom(\"forge\", \"red\");\n    c.addRoom(\"annex\");\n    c.addRoom(\"vault\");\n    c.addRoom(\"cellar\", \"blue\");\n    c.addRoom(\"tower\");\n\n    c.addDoor(\"atrium\", \"gallery\", \"\", 1);\n    c.addDoor(\"gallery\", \"vault\", \"red\", 1);\n    c.addDoor(\"atrium\", \"forge\", \"\", 2);\n    c.addDoor(\"atrium\", \"annex\", \"\", 1);\n    c.addDoor(\"annex\", \"vault\", \"red\", 5);\n    c.addDoor(\"atrium\", \"cellar\", \"\", 1);\n    c.addDoor(\"vault\", \"tower\", \"blue\", 1);\n    c.addDoor(\"forge\", \"cellar\", \"green\", 1);\n    c.addDoor(\"gallery\", \"cellar\", \"\", 3);\n\n    std::cout << \"rooms=\" << c.roomCount() << \" doors=\" << c.doorCount() << \"\\n\";\n    std::cout << \"gallery.neighbours=\" << join(c.find(\"gallery\")->neighbours()) << \"\\n\";\n    std::cout << \"forge.door=\" << c.find(\"forge\")->doors().front()->label() << \"\\n\";\n\n    campus::Keyring ring;\n    ring.collectFrom(*c.find(\"atrium\"));\n    ring.collectFrom(*c.find(\"forge\"));\n    ring.collectFrom(*c.find(\"cellar\"));\n    std::cout << \"keys=\" << ring.list() << \" n=\" << ring.size() << \"\\n\";\n\n    campus::Ledger<int> costs;\n    for (const campus::Door* d : c.find(\"atrium\")->doors())\n        costs.record(d->other(c.find(\"atrium\"))->name(), d->cost());\n    std::cout << \"costs=\" << costs.report() << \" total=\" << costs.total() << \"\\n\";\n\n    campus::Ledger<std::string> words;\n    words.record(\"a\", \"at\");\n    words.record(\"b\", \"rium\");\n    std::cout << \"words=\" << words.report() << \" total=\" << words.total() << \"\\n\";\n\n    std::cout << \"r1=\" << campus::route(c, \"atrium\", \"vault\") << \"\\n\";\n    std::cout << \"r2=\" << campus::route(c, \"atrium\", \"tower\") << \"\\n\";\n    std::cout << \"r3=\" << campus::route(c, \"gallery\", \"cellar\") << \"\\n\";\n    std::cout << \"r4=\" << campus::route(c, \"vault\", \"tower\") << \"\\n\";\n    std::cout << \"r5=\" << campus::route(c, \"atrium\", \"atrium\") << \"\\n\";\n    std::cout << \"r6=\" << campus::route(c, \"atrium\", \"moon\") << \"\\n\";\n    std::cout << \"r7=\" << campus::route(c, \"cellar\", \"tower\") << \"\\n\";\n    std::cout << \"r8=\" << campus::route(c, \"annex\", \"tower\") << \"\\n\";\n    return 0;\n}\n"
+    }
+  },
+  "_turn_budget_note": "raised from 30 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}

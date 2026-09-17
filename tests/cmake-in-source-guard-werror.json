@@ -1,0 +1,115 @@
+{
+  "id": "cmake-in-source-guard-werror",
+  "category": "cmake",
+  "difficulty": "frontier",
+  "prompt": "Write /w/CMakeLists.txt from scratch for the tree in /w and fix the C++ sources so everything of ours builds warning-clean under a strict flag set. cmake_minimum_required(VERSION 3.20), a project() call enabling BOTH C and CXX, C++17 and C11.\n\nTARGETS\n1. A STATIC library `legacy` from vendor/legacy_hash.c, exposing /w/vendor to its consumers. It is third-party: it must NOT be compiled with -Werror or with any of the warning flags below.\n2. An executable `tally` built from src/main.cpp, src/counter.cpp, src/report.cpp AND src/crc.c - a MIXED-LANGUAGE target - with /w/include on its include path, linking `legacy`. It lands at <build>/tally.\n\nTHE FLAGS (this is the hard part)\n3. `tally` carries twelve warning options, attached with target_compile_options. Eight of them apply to BOTH languages:\n     -Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion -Wimplicit-fallthrough -Wdouble-promotion\n   Four of them are C++-only and GCC makes a hard error out of passing them to a C compile under -Werror, so they must reach the C++ sources ONLY, guarded by a $<COMPILE_LANGUAGE:CXX> generator expression:\n     -Wold-style-cast -Wnon-virtual-dtor -Wsuggest-override -Wuseless-cast\n   src/crc.c is ours and is already clean under the eight shared options; it must never see the four C++-only ones. Do not put warning flags in CMAKE_C_FLAGS or CMAKE_CXX_FLAGS - neither string may appear in CMakeLists.txt.\n\nTHE SOURCES\n4. src/counter.cpp, src/report.cpp, src/main.cpp and include/report.hpp do not compile under those twelve options. Fix the code. Constraints, all checked:\n   - vendor/legacy_hash.c, vendor/legacy_hash.h and src/crc.c stay byte-for-byte identical. The vendor file is warning-dirty on purpose and cannot be repaired; isolating it in its own un-strict target is the point of requirement 1.\n   - No suppressions anywhere: no -Wno-* option in any file, and no `#pragma GCC diagnostic` / `#pragma warning` in any file.\n   - tally::summarize is also WRONG, independently of the warnings: its contract is to list each distinct word as `word:count`, joined with `|`, ordered by DESCENDING count and, among equal counts, by ASCENDING word. It currently emits plain alphabetical order. Fix it, and keep the result warning-clean under the same twelve options.\n   - Every other function keeps its name, its parameter count and its observable behaviour. tally::first_or keeps exactly three parameters. tally::pct still truncates toward zero, and tally::rpct still rounds to nearest using the integer `+ whole/2` trick it uses now - rewriting it in floating point changes rpct(3, 8) from 38 to 37 and fails. tally::grade(85) still returns \"B-\" - the switch case that produces it falls through on purpose, so silencing that warning by inserting a break CHANGES the answer and fails.\n\n5. An in-source-build guard, before project(), calling message(FATAL_ERROR ...) with text containing exactly `in-source builds are not allowed` when the binary directory and the source directory are the same directory. Compare REAL paths (get_filename_component(... REALPATH)): a plain string comparison of CMAKE_SOURCE_DIR and CMAKE_BINARY_DIR does not catch a build directory that is a symlink pointing back at the source directory, and that case is checked.\n\nDONE MEANS\n`cmake -S . -B build && cmake --build build` succeeds with no warnings and `./build/tally` prints exactly `words=4 unique=3 first=3 nth=3 hash=11e109a0897cdb91 crc=1280998820303968254 report=the:2|fox:1|quick:1 pct=75 rp=38 grade=B- w=0.750`.\n`cmake -S . -B .` fails with the guard message, and so does configuring into a symlink that resolves to /w.\nLeave no CMakeCache.txt, CMakeFiles/ or compile_commands.json in /w itself.",
+  "setup": {
+    "files": {
+      "include/counter.hpp": "#pragma once\n#include <string>\n#include <vector>\nnamespace tally {\nstd::vector<std::string> words(const std::string& text);\nint unique_count(const std::vector<std::string>& ws);\nint first_or(const std::vector<std::string>& ws, int fallback, int limit);\n}\n",
+      "include/report.hpp": "#pragma once\n#include <cstddef>\n#include <string>\n#include <vector>\nnamespace tally {\nclass Formatter {\npublic:\n    virtual std::string render(const std::string& key, int n) const = 0;\n};\nclass TableFormatter : public Formatter {\npublic:\n    std::string render(const std::string& key, int n) const;\n};\nstd::string summarize(const std::vector<std::string>& ws);\nint pct(std::size_t part, std::size_t whole);\nint nth_len(const std::vector<std::string>& ws, int idx);\nint rpct(std::size_t part, std::size_t whole);\nstd::string grade(int score);\ndouble weight(float w);\n}\n",
+      "include/crc.h": "#ifndef CRC_H\n#define CRC_H\n#ifdef __cplusplus\nextern \"C\" {\n#endif\nunsigned long crc32ish(const char *s);\n#ifdef __cplusplus\n}\n#endif\n#endif\n",
+      "src/counter.cpp": "#include \"counter.hpp\"\n#include <set>\n#include <sstream>\nnamespace tally {\nstd::vector<std::string> words(const std::string& text) {\n    std::vector<std::string> out;\n    std::istringstream in(text);\n    std::string w;\n    while (in >> w) out.push_back(w);\n    return out;\n}\nint unique_count(const std::vector<std::string>& ws) {\n    std::set<std::string> seen;\n    for (int i = 0; i < ws.size(); ++i) {\n        seen.insert(ws[i]);\n    }\n    return seen.size();\n}\nint first_or(const std::vector<std::string>& ws, int fallback, int limit) {\n    int total = static_cast<int>(fallback);\n    if (!ws.empty()) {\n        int total = (int)ws.front().size();\n        return total;\n    }\n    return total;\n}\n}\n",
+      "src/report.cpp": "#include \"report.hpp\"\n#include <map>\nnamespace tally {\nstd::string TableFormatter::render(const std::string& key, int n) const {\n    return key + \":\" + std::to_string(n);\n}\nstd::string summarize(const std::vector<std::string>& ws) {\n    std::map<std::string, int> freq;\n    for (const std::string& w : ws) freq[w] += 1;\n    TableFormatter fmt;\n    std::string out;\n    for (const auto& kv : freq) {\n        if (!out.empty()) out += \"|\";\n        out += fmt.render(kv.first, kv.second);\n    }\n    return out;\n}\nint pct(std::size_t part, std::size_t whole) {\n    if (whole == 0) return 0;\n    double ratio = (double)part / whole;\n    return ratio * 100;\n}\nint nth_len(const std::vector<std::string>& ws, int idx) {\n    if (idx < 0 || idx >= (int)ws.size()) return -1;\n    return (int)ws[idx].size();\n}\nint rpct(std::size_t part, std::size_t whole) {\n    if (whole == 0) return 0;\n    return (part * 100 + whole / 2) / whole;\n}\nstd::string grade(int score) {\n    std::string g;\n    switch (score / 10) {\n        case 10:\n        case 9:\n            g = \"A\";\n            break;\n        case 8:\n            g = \"B\";\n        case 7:\n            g += \"-\";\n            break;\n        default:\n            g = \"C\";\n            break;\n    }\n    return g;\n}\ndouble weight(float w) {\n    return w * 1.5;\n}\n}\n",
+      "src/main.cpp": "#include \"counter.hpp\"\n#include \"report.hpp\"\n#include \"crc.h\"\n#include \"legacy_hash.h\"\n#include <cstdio>\n#include <string>\nint main() {\n    const std::string text = \"the quick the fox\";\n    const auto ws = tally::words(text);\n    const int u = tally::unique_count(ws);\n    const int f = tally::first_or(ws, 7, 99);\n    const unsigned long h = legacy_hash(text.c_str(), 0);\n    const unsigned long c = crc32ish(text.c_str());\n    const std::string rep = tally::summarize(ws);\n    const int p = tally::pct(u, ws.size());\n    std::printf(\"words=%d unique=%d first=%d nth=%d hash=%lx crc=%lu report=%s pct=%d rp=%d grade=%s w=%.3f\\n\",\n                (int)ws.size(), u, f, tally::nth_len(ws, 2), h, c, rep.c_str(), p,\n                tally::rpct(3, 8), tally::grade(85).c_str(), tally::weight(0.5f));\n    return 0;\n}\n",
+      "src/crc.c": "#include \"crc.h\"\n#include <string.h>\n\nunsigned long crc32ish(const char *s)\n{\n    unsigned long h = 0UL;\n    size_t n = strlen(s);\n    size_t i;\n    for (i = 0; i < n; ++i) {\n        h = h * 31UL + (unsigned long)(unsigned char)s[i];\n    }\n    return h;\n}\n",
+      "vendor/legacy_hash.c": "#include \"legacy_hash.h\"\n#include <string.h>\n\nunsigned long legacy_hash(const char *s, int seed)\n{\n    unsigned long h = 5381;\n    int i;\n    for (i = 0; i < strlen(s); ++i) {\n        h = ((h << 5) + h) + (unsigned char)s[i];\n    }\n    return h;\n}\n",
+      "vendor/legacy_hash.h": "#ifndef LEGACY_HASH_H\n#define LEGACY_HASH_H\n#ifdef __cplusplus\nextern \"C\" {\n#endif\nunsigned long legacy_hash(const char *s, int seed);\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
+    }
+  },
+  "tools": [
+    "Bash",
+    "Write",
+    "Read"
+  ],
+  "max_turns": 60,
+  "checks": [
+    {
+      "type": "command_succeeds",
+      "cmd": "test \"$(md5sum vendor/legacy_hash.c | cut -d' ' -f1)\" = \"094c559c768982c5e54e863a6b296466\" && test \"$(md5sum src/crc.c | cut -d' ' -f1)\" = \"b9aa39c79d28ed2412f62281affc7b8f\""
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "if grep -rn -e '-Wno-' -e 'GCC diagnostic' -e '#pragma warning' src include vendor CMakeLists.txt; then exit 1; fi; exit 0"
+    },
+    {
+      "type": "command_succeeds",
+      "cmd": "if grep -qE 'CMAKE_(C|CXX)_FLAGS' CMakeLists.txt; then exit 1; fi; exit 0"
+    },
+    {
+      "type": "file_matches",
+      "path": "src/counter.cpp",
+      "regex": "int\\s+first_or\\s*\\([^)]*,[^)]*,[^)]*\\)"
+    },
+    {
+      "type": "file_matches",
+      "path": "CMakeLists.txt",
+      "regex": "COMPILE_LANGUAGE:CXX"
+    },
+    {
+      "type": "command_succeeds",
+      "timeout_s": 300,
+      "cmd": "rm -rf verify && cmake -S . -B verify -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null && cmake --build verify -j4 >/dev/null"
+    },
+    {
+      "type": "command_output",
+      "cmd": "./verify/tally",
+      "contains": "words=4 unique=3 first=3 nth=3 hash=11e109a0897cdb91 crc=1280998820303968254 report=the:2|fox:1|quick:1 pct=75 rp=38 grade=B- w=0.750"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "bad=0; for f in counter report main; do line=$(jq -r --arg f \"$f\" '.[]|select(.file|endswith(\"src/\"+$f+\".cpp\"))|.command' verify/compile_commands.json); if [ -z \"$line\" ]; then echo \"NO-ENTRY $f\"; bad=1; fi; for w in -Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion -Wimplicit-fallthrough -Wdouble-promotion -Wold-style-cast -Wnon-virtual-dtor -Wsuggest-override -Wuseless-cast; do case \"$line\" in *\"$w\"*) ;; *) echo \"MISSING $w on $f\"; bad=1;; esac; done; done; if [ $bad = 0 ]; then echo CXX-STRICT-OK; fi",
+      "contains": "CXX-STRICT-OK"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "line=$(jq -r '.[]|select(.file|endswith(\"src/crc.c\"))|.command' verify/compile_commands.json); if [ -n \"$line\" ]; then echo C-ENTRY-FOUND; fi; bad=0; for w in -Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion -Wimplicit-fallthrough -Wdouble-promotion; do case \"$line\" in *\"$w\"*) ;; *) bad=1;; esac; done; if [ $bad = 0 ]; then echo C-SHARED-OK; fi; leak=0; for w in -Wold-style-cast -Wnon-virtual-dtor -Wsuggest-override -Wuseless-cast; do case \"$line\" in *\"$w\"*) echo \"C-GOT-CXXONLY $w\"; leak=1;; esac; done; if [ $leak = 0 ]; then echo C-CLEAN-OF-CXXONLY; fi",
+      "regex": "C-ENTRY-FOUND[\\s\\S]*C-SHARED-OK[\\s\\S]*C-CLEAN-OF-CXXONLY"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "line=$(jq -r '.[]|select(.file|endswith(\"vendor/legacy_hash.c\"))|.command' verify/compile_commands.json); if [ -n \"$line\" ]; then echo VENDOR-FOUND; fi; case \"$line\" in *-Werror*) echo VENDOR-STRICT;; *) echo VENDOR-UNSTRICT;; esac",
+      "regex": "VENDOR-FOUND[\\s\\S]*VENDOR-UNSTRICT"
+    },
+    {
+      "type": "command_succeeds",
+      "timeout_s": 240,
+      "cmd": "g++ -std=c++17 -Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion -Wimplicit-fallthrough -Wdouble-promotion -Wold-style-cast -Wnon-virtual-dtor -Wsuggest-override -Wuseless-cast -Iinclude -Ivendor -c src/counter.cpp -o /tmp/a.o && g++ -std=c++17 -Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion -Wimplicit-fallthrough -Wdouble-promotion -Wold-style-cast -Wnon-virtual-dtor -Wsuggest-override -Wuseless-cast -Iinclude -Ivendor -c src/report.cpp -o /tmp/b.o && g++ -std=c++17 -Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion -Wimplicit-fallthrough -Wdouble-promotion -Wold-style-cast -Wnon-virtual-dtor -Wsuggest-override -Wuseless-cast -Iinclude -Ivendor -c src/main.cpp -o /tmp/c.o"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 180,
+      "cmd": "if gcc -std=c11 -Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion -Wimplicit-fallthrough -Wdouble-promotion -Iinclude -c src/crc.c -o /tmp/ok.o 2>/dev/null; then echo C-CLEAN-UNDER-SHARED; fi; if gcc -std=c11 -Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion -Wimplicit-fallthrough -Wdouble-promotion -Wold-style-cast -Wnon-virtual-dtor -Wsuggest-override -Wuseless-cast -Iinclude -c src/crc.c -o /tmp/no.o 2>/dev/null; then echo C-SURVIVES-CXXONLY; else echo C-DIES-ON-CXXONLY; fi",
+      "regex": "C-CLEAN-UNDER-SHARED[\\s\\S]*C-DIES-ON-CXXONLY"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 120,
+      "cmd": "if gcc -std=c11 -Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion -Wimplicit-fallthrough -Wdouble-promotion -Ivendor -c vendor/legacy_hash.c -o /tmp/v.o 2>/dev/null; then echo VENDOR-WOULD-PASS; else echo VENDOR-REALLY-DIRTY; fi",
+      "contains": "VENDOR-REALLY-DIRTY"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 180,
+      "cmd": "rm -rf CMakeCache.txt CMakeFiles Makefile cmake_install.cmake samehere; ln -sfn . samehere; out=$(cmake -S . -B samehere 2>&1); rc=$?; rm -rf samehere CMakeCache.txt CMakeFiles Makefile cmake_install.cmake compile_commands.json; if [ $rc -ne 0 ] && printf '%s' \"$out\" | grep -q 'in-source builds are not allowed'; then echo SYMLINK-GUARD-OK; else echo SYMLINK-GUARD-MISSED; fi",
+      "contains": "SYMLINK-GUARD-OK"
+    },
+    {
+      "type": "command_output",
+      "timeout_s": 180,
+      "cmd": "rm -rf CMakeCache.txt CMakeFiles Makefile cmake_install.cmake; out=$(cmake -S . -B . 2>&1); rc=$?; rm -rf CMakeCache.txt CMakeFiles Makefile cmake_install.cmake compile_commands.json; if [ $rc -ne 0 ] && printf '%s' \"$out\" | grep -q 'in-source builds are not allowed'; then echo INSOURCE-GUARD-OK; else echo INSOURCE-GUARD-MISSED; fi",
+      "contains": "INSOURCE-GUARD-OK"
+    },
+    {
+      "type": "file_absent",
+      "path": "CMakeCache.txt"
+    },
+    {
+      "type": "file_absent",
+      "path": "CMakeFiles"
+    }
+  ],
+  "_turn_budget_note": "raised from 28 on 2026-09-16: 17/20 tests hit the old cap and 5 of those still passed, so it truncated work rather than catching thrashing. Turns used are reported separately as efficiency."
+}
